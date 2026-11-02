@@ -228,6 +228,21 @@ It checks: API health, 401 on a bad key, per-user schema isolation (retain as
 hermes-agent, recall as deepseek-harness → nothing), tenant schemas exist in
 Postgres, worker health, control-plane reachable, webhook sink reachable.
 
+### Verified on the first deployment (2026-11-02)
+
+Windows 11 + Docker Desktop, RTX 5070 Ti 16 GB, Docker 29.9 / Compose 5.6.
+
+| Check | Evidence |
+|---|---|
+| Stack healthy | `db`, `api`, `worker`, `control-plane`, `webhook-sink` all `Up (healthy)` |
+| Schema isolation | `\dn` lists `user_hermes_agent` + `user_deepseek_harness`; retain as one user is invisible to the other (404 on the other tenant's bank) |
+| Embeddings 1024-dim | `select vector_dims(embedding) ...` -> `1024` |
+| Model calls | `llm_requests`: `embedding_* | openai | BAAI/bge-m3`, `retain_extract_facts | deepseek | deepseek-flash`, `decision_recall_rerank | typesafe | typesafe/jev-1.14`, `decision_consolidation_triage | typesafe | typesafe/jev-1.14` - all `success` |
+| Consolidation | worker log: `[CONSOLIDATION] bank=smoke ... tenant: user_hermes_agent` |
+| Audit log | 9 rows: `retain`, `recall`, `consolidation`, `webhook_delivery` |
+| Webhooks | sink received signed `POST /hindsight` with `x-hindsight-signature` + `consolidation.completed` body, 200 OK |
+| Smoke test | `scripts/smoke-test.ps1` -> all checks passed |
+
 ---
 
 ## 8. Local GPU backends (optional)
