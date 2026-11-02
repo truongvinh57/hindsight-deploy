@@ -174,14 +174,19 @@ Reranker, tested and rejected for the local stack:
 
 ## 10. Recall ranks with Qwen3, Jev keeps the rest
 
-With a decision model configured, recall ranks candidates with Jev and never
-calls a reranker — so enabling both would have left the requested
+With a decision model configured **for recall**, recall ranks candidates with Jev
+and never calls a reranker — so enabling both would have left the requested
 Qwen3-Reranker unused. `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`
 keeps the cross-encoder on the recall path (verified: `rerank | cohere |
 Qwen/Qwen3-Reranker-0.6B | success`) while Jev still drives consolidation
-triage and knowledge-page impact (`decision_consolidation_triage | typesafe |
+triage and knowledge-page impact (`consolidation | typesafe |
 typesafe/jev-1.14 | success`). Flip that variable to `typesafe` to rank recall
 with Jev instead.
+
+This split is the shipped default: `DECISION_MODEL_PROVIDER=typesafe` — Jev on
+for every job only it can do — together with
+`RECALL_DECISION_MODEL_PROVIDER=none`, so the reranker keeps the one job both
+do. Section 13 has the measurements and the reasoning.
 
 ## 11. Embeddings moved off the GPU: Qwen3-Embedding-0.6B on DeepInfra
 
@@ -289,7 +294,7 @@ yes-probability saturates on short facts. That is fine for ordering, but do not
 set `min_scores.rerank` thresholds from these numbers without measuring on a
 larger candidate set.
 
-## 13. Recall ranker: Jev vs Qwen3-Reranker (measured, then switched to Jev)
+## 13. Jev vs the reranker: the overlap goes to the reranker, the rest stays on Jev
 
 The question was whether recall should rank with the decision model (Jev, asked
 "would showing this memory help rather than distract?") or with the cross-encoder
@@ -330,28 +335,29 @@ database không?" with each ranker:
 | 4 | the rule (chunk) | restore procedure |
 | 8 | restore procedure | superseded "không cần backup" fact |
 
-That settled it: for a memory bank, the reader needs the current rule first, and
-the superseded decision is context, not the answer. Jev put the answer at #1 and
-the stale decision at #8; Qwen3 did the opposite. Latency on the real recall was
-1 119 ms (Jev) against 1 100 ms (Qwen3).
+On that axis Jev wins: in a memory bank the reader needs the current rule first,
+and the superseded decision is context, not the answer. Jev put the answer at #1
+and the stale decision at #8; Qwen3 did the opposite. Latency on the real recall
+was 1 119 ms (Jev) against 1 100 ms (Qwen3). The reranker nevertheless keeps the
+job, for the reasons below.
 
-### Outcome: stability wins for this deployment, quality is recovered a cheaper way
+### Outcome: the overlap goes to the reranker
 
-Jev was switched on, measured, and then switched **back off** on the stable path.
-The deciding factor is not the ranking, it is the blast radius:
+Ranking a recall pool is the one job both can do, and on balance the reranker
+wins it: Qwen3 separates junk far more sharply, returns calibrated scores (so a
+`min_scores.reranker` floor is possible; Jev returns rank positions and the
+floor is rejected with 400), costs ~2.8x less per recall, and keeps recall
+independent of OpenRouter:
 
 | | reranker on recall | Jev on recall |
 |---|---|---|
 | providers recall depends on | DeepInfra (already mandatory for embeddings) | DeepInfra **and** OpenRouter |
-| OpenRouter outage | consolidation triage + reflect degrade (reflect handles it: `decision_model_failed`) | **recall fails** |
+| OpenRouter outage | recall unaffected; reflect and page refreshes degrade gracefully | **recall fails** |
 | DeepInfra outage | recall fails either way (embeddings) | recall fails either way |
-| cost per recall (30 candidates) | $0.0000278 | $0.0000767 |
+| cost per recall (30 candidates) | \$0.0000278 | \$0.0000767 |
 
-So `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: none` — Jev stays on
-consolidation triage and knowledge-page impact, where failure is not fatal.
-
-The quality problem Jev was fixing (a superseded decision ranking first) is
-handled instead by `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`: when an
+Jev's edge on recall (demoting a superseded decision) is recovered more cheaply by
+`HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`: when an
 observation is returned, the raw facts it was consolidated from are dropped, so
 the stale decision appears once, as its observation, and that observation says it
 was rejected. Measured on the same bank and query:
@@ -363,38 +369,73 @@ was rejected. Measured on the same bank and query:
 | 3 | the current rule | restore procedure | "was rejected" observation |
 | 8 | restore procedure | — | stale "không cần backup" fact |
 
-Both stable-path rows now read correctly: the rejected decision is either second
-and labelled, or first and labelled — never an unqualified stale claim. The cost
-is detail: preferring observations trades granular fact text for the consolidated
+With `prefer_observations` on, the rejected decision is either second and
+labelled or first and labelled — never an unqualified stale claim. The cost is
+detail: preferring observations trades granular fact text for the consolidated
 summary (per-request `prefer_observations` still overrides the default).
 
-If ranking quality ever matters more than that independence, the switch is one
-line (`typesafe`); the trade-off is recorded here so it is a decision, not a
-surprise.
+So recall ranking stays on Qwen3:
+`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`.
 
-### Jev as consolidation triage: measured, then turned off here
+### What that does *not* say: Jev stays on for the jobs only it can do
+
+The reranker wins the overlap and nothing else. It scores (query, document)
+relevance; it cannot answer a typed question about a memory, and those questions
+have no other implementation:
+
+| Jev-only job | What it decides | Enable flag (default in **bold**) |
+|---|---|---|
+| Consolidation triage | restatement, extension, contradiction or chatter between a new fact and an existing observation, settled before the consolidation LLM is called | `HINDSIGHT_API_CONSOLIDATION_USE_DECISION_MODEL` = **true** |
+| Knowledge-page impact | which new memories could change an existing page (delta refresh), instead of running a full reflect | `HINDSIGHT_API_MENTAL_MODEL_DELTA_USE_DECISION_MODEL` = **true** |
+| Knowledge-page refresh | whether a page rebuild has enough evidence | `HINDSIGHT_API_MENTAL_MODEL_REFRESH_USE_DECISION_MODEL` = **true** |
+| Reflect | which evidence to prune, and when there is enough to answer | `HINDSIGHT_API_REFLECT_USE_DECISION_MODEL` = **true** |
+
+All four default to true upstream; this compose file states them explicitly.
+Turning Jev off does not move any of it to the reranker — each switch silently
+falls back to a plain LLM path, so the capability is absent with no error and no
+reminder. That is why the default here is
+`HINDSIGHT_API_DECISION_MODEL_PROVIDER=typesafe` with `OPENROUTER_API_KEY`
+required, not `none`.
+
+One coupling is unavoidable: `recall_decision_model_prune` and
+`recall_decision_model_dedup` (drop pool members Jev judges unhelpful, merge
+near-duplicates) are Jev-only too, but 1.1.0 wires them to Jev *as the recall
+ranker* — `engine/search/reranking.py` replaces the cross-encoder with the
+decision reranker, it does not run one after the other. They therefore cannot be
+layered on top of Qwen3; enabling them means handing recall's ranking to Jev, i.e.
+reversing the section above. Left off, and recorded so the omission is a decision.
+
+### The price: triage overhead at small batch sizes, accepted
 
 Same bank content, same two retains, consolidated once with Jev on and once off:
 
 | | Jev ON | Jev OFF |
 |---|---|---|
-| `decision_consolidation_triage` | 5 calls, 5 170 tokens, 913 ms avg | — |
+| `consolidation`, provider `typesafe` (the triage calls) | 5 calls, 5 170 tokens, 913 ms avg | — |
 | `consolidation` (LLM) | 2 calls, 9 485 tokens | 2 calls, 9 716 tokens |
 | total model calls | 7 | **2** |
 | consolidation wall time | ~4.5 s of triage on top | 2.4 s |
 
-At two new facts per consolidation, Jev adds five triage calls and roughly the
-same LLM work — it is overhead, not a saving. Upstream's "~40 % fewer LLM calls at
-the same pass rate" is measured on evals with far larger consolidation batches,
-where triage resolves most facts without an LLM call. This deployment retains a
-handful of items at a time and has no knowledge pages or mental models, so neither
-of Jev's other jobs applies.
+At two new facts per consolidation Jev adds five triage calls and saves no LLM
+call: upstream's "~40 % fewer LLM calls at the same pass rate" is measured on sets
+with far larger consolidation batches, where triage settles most facts without an
+LLM call. The cost is kept anyway, deliberately:
 
-Decision: `HINDSIGHT_API_DECISION_MODEL_PROVIDER=none` by default, and
-`OPENROUTER_API_KEY` becomes optional. The difference from a reranker matters
-here — a reranker scores (query, document) relevance, so it cannot stand in for a
-typed decision like "does this new fact restate, extend or contradict that
-observation". Disabling the decision model does not hand that work to the
-reranker; it falls back to the consolidation LLM path upstream keeps for exactly
-this case. Re-enable with `DECISION_MODEL_PROVIDER=typesafe` plus an OpenRouter
-key if batches grow enough for triage to pay off.
+- It is the only path to the four capabilities above. Off means all four vanish
+  into a fallback nobody will notice is being taken, and no one will remember to
+  flip a flag later.
+- The overhead scales with facts per consolidation — and so does the saving, so the
+  balance inverts if this deployment ever ingests documents rather than chat turns.
+- The blast radius is contained: recall never calls Jev. An OpenRouter outage
+  degrades consolidation triage, reflect and page refreshes — reflect handles it
+  (`decision_model_failed`) — but memory reads are untouched, because recall
+  ranks with the reranker. Conversely, recall fails if DeepInfra does
+  (embeddings), whichever ranker is configured — DeepInfra is not optional either
+  way.
+
+To reverse it anyway: `DECISION_MODEL_PROVIDER=none`, and relax the required-key
+guard in `docker-compose.yml` too (`${OPENROUTER_API_KEY:?...}` →
+`${OPENROUTER_API_KEY:-}`). The second edit is not optional: compose
+interpolates the whole file at parse time, so an empty key aborts `up` even when
+no operation would use it. Nothing else changes — the Qwen3-Reranker already owns
+recall.

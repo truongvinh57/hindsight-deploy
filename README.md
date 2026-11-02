@@ -11,8 +11,8 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
   `deepseek-ai/DeepSeek-V4.1-Flash-1017`
 - Embeddings: `Qwen/Qwen3-Embedding-0.6B` on DeepInfra (1024-dim)
 - Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, through `rerank-adapter`
-- Decision model (Jev): **optional, off by default** — measured as pure overhead at
-  this workload's size; see §5
+- Decision model (Jev 1.14, via OpenRouter): **on by default** — it does the jobs
+  only a decision model can; ranking stays on the reranker (§5)
 - **No GPU, no local model, no build step.**
 
 ---
@@ -45,7 +45,7 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 ```
 
 External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover, embeddings,
-reranker via `rerank-adapter`). Optional: OpenRouter (Jev decision model).
+reranker via `rerank-adapter`), OpenRouter (Jev, the decision model).
 
 **Why nothing is built:** the multi-user tenant extension is not published to
 PyPI, but the server imports extensions from `PYTHONPATH`. The package is
@@ -90,7 +90,7 @@ Idle usage is far lower (~0.9 GB total measured). Raise the caps per machine in
 
 ```bash
 git clone https://github.com/truongvinh57/hindsight-deploy.git && cd hindsight-deploy
-cp .env.example .env          # then fill in the required secrets (OpenRouter is optional)
+cp .env.example .env          # then fill in the required secrets
 docker compose up -d
 ./scripts/smoke-test.sh       # Windows: .\scripts\smoke-test.ps1
 ```
@@ -178,40 +178,55 @@ anchor is shared by api and worker); secrets and per-machine overrides live in
 | Vision | `HINDSIGHT_API_VLM_*` | `deepseek` / `deepseek-flash` (text+image) |
 | Embeddings | `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` | `Qwen/Qwen3-Embedding-0.6B`, 1024 dims, query instruction |
 | Reranker | `HINDSIGHT_API_RERANKER_COHERE_*` -> adapter | `Qwen/Qwen3-Reranker-0.6B` |
-| Decision model (optional) | `HINDSIGHT_API_DECISION_MODEL_*` | default `none`. Set `typesafe` + `OPENROUTER_API_KEY` to enable Jev (base `https://openrouter.ai/api`, model `typesafe/jev-1.14`) |
+| Decision model (Jev) | `HINDSIGHT_API_DECISION_MODEL_*` | `typesafe`, base `https://openrouter.ai/api`, model `typesafe/jev-1.14`; key = `OPENROUTER_API_KEY` (required) |
 
 Jev is not a chat model: Hindsight's `typesafe` provider posts System One bodies
 to `<base>/v1/systemone`, and OpenRouter serves exactly that at
-`https://openrouter.ai/api/v1/systemone`, so the base URL would be
+`https://openrouter.ai/api/v1/systemone`, so the base URL is
 `https://openrouter.ai/api`. No adapter is involved.
 
-**It is off by default here, on measurement.** Jev's jobs are typed decisions, not
-ranking: consolidation triage (how a new fact relates to existing observations),
-knowledge-page impact, and reflect's evidence-sufficiency check. A 2-fact
-consolidation with Jev on made **5 triage calls (+5 170 tokens, +4.5 s) and saved
-zero LLM calls**; the ~40 % LLM-call saving upstream reports needs much larger
-batches, and this deployment has no knowledge pages or mental models. So the
-stable path is the plain LLM one, with one fewer provider and one fewer key.
+**The split is by capability, not by preference.**
 
-**Recall is ranked by the Qwen3-Reranker**, and `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`
-collapses a raw fact into the observation that superseded it, so a stale decision
-shows once, labelled as rejected.
+- *A reranker and Jev can both do it* — scoring how well a candidate answers the
+  query, i.e. ranking a recall pool — the **reranker** does it.
+- *Only a decision model can* — consolidation triage (does this new fact
+  restate, extend, contradict or merely chatter about an observation),
+  knowledge-page impact and delta gating, reflect's evidence-sufficiency check —
+  **Jev is on by default**. Those switches fall back to a plain LLM path when no
+  decision model exists, so leaving Jev off silently loses capability that
+  nobody would remember to re-enable.
 
-This is the deliberate stability choice. Ranking with **Jev** measures slightly
-better — on the same bank it puts the current rule at #1 and the superseded
-"we don't need backups" decision at #8, where the reranker keeps the rejected
-decision first (framed as rejected) — but Jev would put **OpenRouter on the read
-path**: an OpenRouter outage would break recall outright, while today it only
-degrades consolidation triage and reflect. Exact measurements, cost and the
-one-line switch are in `docs/decisions.md` §13.
+On recall the two are mutually exclusive: a recall decision model *replaces* the
+cross-encoder (`engine/search/reranking.py`), it does not run after it. So
+`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: none` is what "prefer the
+reranker on the overlap" means concretely. One consequence worth knowing: the
+two Jev-only recall extras, `recall_decision_model_prune` and `_dedup`, ship
+coupled to Jev-as-the-ranker in 1.1.0, so they cannot be layered on top of
+Qwen3 — they are off along with recall's decision model.
+
+**What it costs:** OpenRouter joins the consolidation, reflect and knowledge-page
+paths — never recall — and a two-fact consolidation spends ~5 triage calls
+(~5 170 tokens, ~4.5 s). That is the price of holding the
+triage and page-gating capability on, and it is paid deliberately — the
+measurements, the alternative and the one-line flip are in
+`docs/decisions.md` §13.
+
+**Recall is ranked by the Qwen3-Reranker**, with
+`HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`: a raw fact collapses into the
+observation that superseded it, so a stale decision shows once, labelled as
+rejected. Ranking recall with Jev instead measures slightly better on superseded
+decisions (it puts the current rule at #1 and demotes the rejected one to #8)
+but worse on junk separation, costs ~2.8x per recall, and makes OpenRouter a hard
+dependency of reads.
 
 ### Features enabled
 
-Observations + auto-consolidation, mental models / knowledge pages, MCP server,
-audit log (90 days), LLM request tracing (7 days, 8 000 chars per side), native
-file storage, native BM25 with the `simple` dictionary (no English stemming on
-Vietnamese memory text), signed webhooks for `retain.completed` and
-`consolidation.completed`, metrics backlog.
+Observations + auto-consolidation, decision model (Jev) for consolidation triage,
+knowledge-page impact and reflect evidence sufficiency, mental models / knowledge
+pages, MCP server, audit log (90 days), LLM request tracing (7 days, 8 000 chars
+per side), native file storage, native BM25 with the `simple` dictionary (no
+English stemming on Vietnamese memory text), signed webhooks for
+`retain.completed` and `consolidation.completed`, metrics backlog.
 
 Off on purpose: batch retain (needs a batch-capable provider), memory defense
 (per-bank opt-in), OTEL export (no collector), Oracle backend, local models.
@@ -281,10 +296,11 @@ docker compose exec db psql -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-
 
 Checks: API health, 401 on a bad key, per-user isolation (retain as hermes-agent,
 recall as deepseek-harness → nothing), the tenant schemas in Postgres, worker
-health, control-plane reachability (follows its 307 to `/login`), webhook sink.
-The bash script skips the database/worker checks with a clear message when the
-docker CLI is not usable in that shell (e.g. a WSL distro without Docker Desktop
-integration).
+health, that the **decision model (Jev) is configured** for the write path while
+**recall still ranks with the reranker**, control-plane reachability (follows its
+307 to `/login`), webhook sink. The bash script skips the database/worker/model
+checks with a clear message when the docker CLI is not usable in that shell (e.g.
+a WSL distro without Docker Desktop integration).
 
 ### Verified on the first deployment
 
@@ -293,7 +309,7 @@ Windows 11 + Docker Desktop, Docker 29.9 / Compose 5.6.
 | Check | Evidence |
 |---|---|
 | Isolation | retain as hermes-agent is invisible to deepseek-harness (404 on the other tenant's bank); `\dn` lists both schemas |
-| Model calls | `llm_requests`: `embedding_* | openai | Qwen/Qwen3-Embedding-0.6B`, `retain_extract_facts | deepseek | deepseek-flash`, `rerank | cohere | Qwen/Qwen3-Reranker-0.6B`, and (with the decision model on) `decision_consolidation_triage | typesafe | typesafe/jev-1.14` — all `success` |
+| Model calls | `llm_requests`: `retain | deepseek | deepseek-flash`, `retain | openai | Qwen/Qwen3-Embedding-0.6B`, `consolidation | typesafe | typesafe/jev-1.14` (Jev triage), `consolidation | deepseek | deepseek-flash`, `recall | cohere | Qwen/Qwen3-Reranker-0.6B` — all `success` |
 | Embedding width | `vector_dims(embedding)` -> `1024` in both tenant schemas |
 | Consolidation | worker log: `[CONSOLIDATION] bank=smoke ... tenant: user_hermes_agent` |
 | Webhooks | sink received signed `retain.completed` and `consolidation.completed` POSTs (HMAC verified), HTTP 200 |

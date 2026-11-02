@@ -42,6 +42,8 @@ PGDB="${POSTGRES_DB:-$(env_get POSTGRES_DB)}"
 PGDB="${PGDB:-hindsight}"
 
 [ -n "$HERMES" ] && [ -n "$HARNESS" ] || { echo "HERMES_API_KEY / DEEPSEEK_HARNESS_API_KEY missing from .env"; exit 1; }
+OPENROUTER="$(env_get OPENROUTER_API_KEY)"
+[ -n "$OPENROUTER" ] || { echo "OPENROUTER_API_KEY missing from .env (required: the decision model, Jev, uses it)"; exit 1; }
 
 # http_code <curl args...>
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$@"; }
@@ -106,6 +108,18 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   else
     bad "worker health" "unreachable"
   fi
+
+  # Full-feature checks. Jev must be configured for the operations only a
+  # decision model can do; recall must still rank with the reranker.
+  dm="$(docker compose -f "$COMPOSE_FILE" exec -T api /app/api/.venv/bin/python -c \
+    "from hindsight_api.config import get_config; d=get_config().decision_model_config('consolidation'); print('none' if d is None else d.provider)" \
+    2>/dev/null | tr -d ' \r')"
+  [ "$dm" = "typesafe" ] && pass "decision model (Jev) configured" || bad "decision model (Jev) configured" "provider is '$dm', expected typesafe"
+
+  rec="$(docker compose -f "$COMPOSE_FILE" exec -T api /app/api/.venv/bin/python -c \
+    "from hindsight_api.config import get_config; c=get_config(); d=c.decision_model_config('recall'); print(('none' if d is None else d.provider) + ' ' + c.reranker_provider)" \
+    2>/dev/null | tr -d ' \r')"
+  [ "$rec" = "none cohere" ] && pass "recall ranks with the reranker" || bad "recall ranks with the reranker" "got '$rec', expected 'none cohere'"
 else
   echo "  [SKIP] schema + worker checks (no docker CLI in this shell; from WSL enable Docker Desktop integration)"
 fi

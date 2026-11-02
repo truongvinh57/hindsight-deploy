@@ -32,6 +32,8 @@ Get-Content $envFile | ForEach-Object {
 $hermes  = $cfg["HERMES_API_KEY"]
 $harness = $cfg["DEEPSEEK_HARNESS_API_KEY"]
 if (-not $hermes -or -not $harness) { throw "HERMES_API_KEY / DEEPSEEK_HARNESS_API_KEY missing from .env" }
+# Jev (the decision model) is on by default, so its key is a required secret.
+if (-not $cfg["OPENROUTER_API_KEY"]) { throw "OPENROUTER_API_KEY missing from .env (required: the decision model, Jev, uses it)" }
 
 # The :? guards in compose only catch a MISSING variable, not one that still
 # holds a template placeholder. Refuse to verify a stack booted from the template.
@@ -106,6 +108,19 @@ Check "tenant schemas exist in Postgres" {
 Check "worker health" {
   $out = docker compose -f $compose exec -T worker /app/api/.venv/bin/python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8889/health', timeout=8).status)" 2>&1 | Out-String
   if ($out -notmatch "200") { throw "worker health: $out" }
+}
+
+Check "decision model (Jev) configured" {
+  # Proves OPENROUTER_API_KEY reached the container and the provider resolves for
+  # the operations only a decision model can do. Recall is deliberately NOT it.
+  $out = docker compose -f $compose exec -T api /app/api/.venv/bin/python -c "from hindsight_api.config import get_config; d=get_config().decision_model_config('consolidation'); print('none' if d is None else d.provider)" 2>&1 | Out-String
+  if ($out -notmatch "typesafe") { throw "consolidation decision model not configured: $out" }
+}
+
+Check "recall ranks with the reranker" {
+  $out = docker compose -f $compose exec -T api /app/api/.venv/bin/python -c "from hindsight_api.config import get_config; c=get_config(); print('none' if c.decision_model_config('recall') is None else c.decision_model_config('recall').provider); print(c.reranker_provider)" 2>&1 | Out-String
+  if ($out -notmatch "none") { throw "a decision model is on the recall path: $out" }
+  if ($out -notmatch "cohere") { throw "reranker provider is not cohere: $out" }
 }
 
 Check "control plane reachable" {
