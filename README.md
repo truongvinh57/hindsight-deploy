@@ -88,7 +88,7 @@ Idle usage is far lower (~0.9 GB total measured). Raise the caps per machine in
 ## 3. Quickstart
 
 ```bash
-git clone <this repo> && cd hindsight-deploy
+git clone https://github.com/truongvinh57/hindsight-deploy.git && cd hindsight-deploy
 cp .env.example .env          # then fill in the six required secrets
 docker compose up -d
 ./scripts/smoke-test.sh       # Windows: .\scripts\smoke-test.ps1
