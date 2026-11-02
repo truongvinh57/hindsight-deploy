@@ -43,17 +43,25 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_VLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
   HINDSIGHT_API_VLM_MODEL: deepseek-flash
 
-  # ── Embeddings: BAAI/bge-m3, 1024-dim, OpenAI-compatible ───────────────
-  # Default backend is DeepInfra; switch EMBEDDINGS_BASE_URL to
-  # http://bge-m3:8000/v1 (profile local-embed) for the local vLLM server.
-  # Same model weights either way, so vectors stay comparable.
+  # ── Embeddings: Qwen3-Embedding-0.6B on DeepInfra, 1024-dim ────────────
+  # No model is hosted locally: this removes the ~32 GB vLLM image and the GPU
+  # from the memory path. 1024 dims matches the schema, so no migration.
+  #
+  # CHANGING THE MODEL, THE DIMENSION OR THE PREFIX INVALIDATES EVERY STORED
+  # VECTOR (same width = Hindsight cannot detect it) and requires re-ingesting.
   HINDSIGHT_API_EMBEDDINGS_PROVIDER: openai
-  HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${EMBEDDINGS_API_KEY:-${DEEPINFRA_API_KEY:?}}
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
   HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://api.deepinfra.com/v1/openai}
-  HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${EMBEDDINGS_MODEL:-BAAI/bge-m3}
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${EMBEDDINGS_MODEL:-Qwen/Qwen3-Embedding-0.6B}
   HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE: "32"
   HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS: "8192"
   HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS: "8"
+  # Qwen3-Embedding expects an instruction on the query side only; passages go
+  # in raw (passage prefix stays empty). ${EMBEDDINGS_QUERY_PREFIX} can blank it.
+  # Qwen3-Embedding wants an instruction on the query side; passages stay raw.
+  # Literal (not interpolated) because the value contains a newline. Changing it
+  # invalidates stored vectors.
+  HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX: "Instruct: Given a user question, retrieve passages that answer it\nQuery: "
 
   # ── Reranker: Qwen3-Reranker-0.6B on DeepInfra ──────────────────────────
   # DeepInfra serves the model on its inference API (multipart/JSON with
@@ -223,11 +231,13 @@ services:
       retries: 5
       start_period: 15s
 
-  # ── Optional local GPU backends (not started by default) ────────────────
-  # Enable with:  docker compose --profile local-embed up -d bge-m3
-  #               docker compose --profile local-rerank up -d reranker
-  # Then point .env at them (see bge-m3/README.md). Same weights as the
-  # DeepInfra/OpenRouter defaults, so switching does not invalidate vectors.
+  # ── OPTIONAL: local GPU embeddings (NOT used by the default stack) ──────
+  # The stack embeds with Qwen3-Embedding-0.6B on DeepInfra; this profile is a
+  # documented fallback for offline/no-cloud use, NOT a drop-in swap: BGE-M3 and
+  # Qwen3 are different vector spaces, so switching in EITHER direction requires
+  # re-ingesting every memory (the width is 1024 for both, so Hindsight will not
+  # warn). Start it with:  docker compose --profile local-embed up -d bge-m3
+  # and see bge-m3/README.md, including the --served-model-name trap.
   bge-m3:
     profiles: ["local-embed"]
     image: vllm/vllm-openai:v0.31.0

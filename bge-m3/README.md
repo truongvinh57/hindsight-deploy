@@ -1,4 +1,10 @@
-# Local GPU backends (optional)
+# Local GPU BGE-M3 (optional — NOT used by the default stack)
+
+> The deployment embeds with **Qwen3-Embedding-0.6B on DeepInfra**; nothing here
+> runs by default. This recipe is kept as the offline fallback and as the record
+> of how the model was served. Switching to it (or away from it) requires
+> re-ingesting every memory: BGE-M3 and Qwen3 are different vector spaces at the
+> same 1024 width, so Hindsight will not detect the change.
 
 Adapted from [`truongvinh57/bge-m3-deploy`](https://github.com/truongvinh57/bge-m3-deploy),
 reduced from "2 vLLM instances + HAProxy, one GPU each" to **one vLLM instance per

@@ -178,3 +178,48 @@ Qwen/Qwen3-Reranker-0.6B | success`) while Jev still drives consolidation
 triage and knowledge-page impact (`decision_consolidation_triage | typesafe |
 typesafe/jev-1.14 | success`). Flip that variable to `typesafe` to rank recall
 with Jev instead.
+
+## 11. Embeddings moved off the GPU: Qwen3-Embedding-0.6B on DeepInfra
+
+The local vLLM BGE-M3 service was verified working (see section 9) and then
+**removed from the running deployment**, because it cost more than it bought:
+
+| | local BGE-M3 (vLLM) | Qwen3-Embedding-0.6B (DeepInfra) |
+|---|---|---|
+| disk | 32.3 GB image + 3.5 GB weights | 0 |
+| VRAM | 4.4 GB | 0 |
+| API cold start | 60-135 s (engine + model load) | ~10 s |
+| ops surface | +1 container, GPU driver dependency | +0 |
+| vectors | 1024 dims | 1024 dims (schema unchanged) |
+
+Measured on the same Vietnamese pair (one relevant, one unrelated passage):
+BGE-M3 scored 0.7527 / 0.2461 (gap 0.507), Qwen3-0.6B scored 0.6984 / 0.0961
+(gap 0.602). One pair proves nothing statistically, but it does show the cloud
+model is not a downgrade on this content.
+
+**The privacy argument is weak here**, which is what tipped it: retain already
+sends the raw content to DeepSeek for fact extraction and recall already sends
+candidates to DeepInfra for reranking. Keeping embeddings local protected
+nothing that was not already leaving the machine — it only saved latency and
+quota.
+
+What the switch required (and what any future embedding change requires):
+
+1. **Re-ingest everything.** Both models are 1024-wide, so Hindsight's
+   `ensure_embedding_dimension` sees no mismatch and silently accepts the old
+   vectors into the new space. The two tenant schemas were dropped and rebuilt
+   by the migration on the next startup (`vector(1024)` confirmed per schema).
+   The data at that point was test data: 5 documents / 7 memory units.
+2. **Query instruction.** Qwen3-Embedding is trained with
+   `Instruct: ...\nQuery: ` on the query side only; it is set literally in
+   `docker-compose.yml` (`HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX`, a newline in
+   the value, which is why it is not interpolated from `.env`). Passage prefix
+   stays empty. Changing it later also invalidates vectors.
+3. **Stay at 0.6B.** 1024 dims fits pgvector's HNSW limit (2000). Qwen3-Embedding-4B
+   is 2560-wide and would require halfvec / pgvectorscale / vchord, i.e. a
+   different Postgres image — not a config change.
+
+Remaining trade-off, stated plainly: Hindsight's embedding provider has **no
+failover chain** (LLM and reranker do). DeepInfra being unreachable stops
+retain/recall. The `bge-m3` profile is kept in the compose file as the offline
+fallback for exactly that scenario.
