@@ -405,6 +405,15 @@ decision reranker, it does not run one after the other. They therefore cannot be
 layered on top of Qwen3; enabling them means handing recall's ranking to Jev, i.e.
 reversing the section above. Left off, and recorded so the omission is a decision.
 
+Two traps for whoever turns them on: `PATCH /v1/default/banks/{bank}/config`
+**rejects** both names as unknown fields in 1.1.0 — they are served from
+`HINDSIGHT_API_RECALL_DECISION_MODEL_PRUNE/_DEDUP`, or per request as
+`{"prune": true, "dedup": true}` — and they cost real time, because every pool
+member gets a decision question. Measured on the same four-candidate bank:
+reranker 1 108 ms, Jev 1 707 ms, Jev + prune/dedup 4 072 ms, and the prune did not
+drop anything (Jev judged the junk candidate helpful). Ranking with Jev also put
+that junk at #2, where the reranker keeps it last.
+
 ### The price: triage overhead at small batch sizes, accepted
 
 Same bank content, same two retains, consolidated once with Jev on and once off:
@@ -439,3 +448,33 @@ guard in `docker-compose.yml` too (`${OPENROUTER_API_KEY:?...}` →
 interpolates the whole file at parse time, so an empty key aborts `up` even when
 no operation would use it. Nothing else changes — the Qwen3-Reranker already owns
 recall.
+
+### If the reranker were dropped entirely (measured)
+
+The counterfactual — Jev as the only ranker, `RECALL_DECISION_MODEL_PROVIDER=typesafe`
+— was measured on this same stack, with one bank, one query, four candidates. The
+bank held a superseded decision, the rule that replaced it, a restore-test fact,
+and two irrelevant candidates (one topical, one pure noise).
+
+| | Qwen3 reranker | Jev only | Jev + prune/dedup |
+|---|---|---|---|
+| recall wall clock (warm) | **1 108 ms** | 1 707 ms | 4 072 ms |
+| ranker tokens per recall | — | 815–1 630 | 2 445 |
+| rank of the pure-noise candidate | **4th (last)** | 2nd | 2nd (prune did not drop it) |
+| rank of the restore-test rule | 2nd | 3rd | 3rd |
+| `min_scores.reranker` floor | works (calibrated scores) | rejected, 400 | rejected, 400 |
+| read-path providers | DeepInfra (already required for embeddings) | + OpenRouter | + OpenRouter |
+| `rerank-adapter` container | needed (96 MB) | removable | removable |
+
+Jev-only buys exactly two things: `prune`/`dedup` become reachable, and one
+container plus one proxy route disappear. On this workload it costs 1.5x the
+latency, a token bill on every read, the score floor, and — the part that matters —
+junk separation: the noise candidate moves from last to second, which is the same
+failure the 30-candidate pool showed earlier (Qwen3 rank 21 against Jev rank 10).
+Prune did not compensate here: Jev judged the noise candidate *helpful*, so nothing
+was dropped and only the bill grew.
+
+Verdict: the reranker keeps the read path. Jev-only is worth revisiting only if
+prune/dedup ever matter more than junk separation and read-path independence —
+and then it is one env var, plus deleting the adapter service and its
+`HINDSIGHT_API_RERANKER_*` block so nothing sits unused.
