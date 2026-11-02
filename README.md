@@ -184,10 +184,17 @@ to `<base>/v1/systemone`, and OpenRouter serves exactly that at
 `https://openrouter.ai/api/v1/systemone`, so the base URL is
 `https://openrouter.ai/api`. No adapter is involved.
 
-With a decision model configured, recall would rank with Jev instead of the
-reranker. `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none` keeps Qwen3-Reranker
-on the recall path while Jev still drives consolidation triage and knowledge-page
-impact. Flip it to `typesafe` to rank recall with Jev instead.
+**Recall is ranked by Jev** (`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=typesafe`):
+for each candidate Jev answers *"would showing this memory help someone answering
+the question, rather than distract them?"*. Measured against the Qwen3-Reranker on
+the same bank, this lifts the actionable fact to #1 and drops a superseded
+"we don't need backups" decision from #1 to #8 — see `docs/decisions.md` §13.
+
+The Qwen3-Reranker path is still wired as a one-line fallback: set
+`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none` and recall ranks with
+`Qwen/Qwen3-Reranker-0.6B` (via `rerank-adapter`) instead. Trade-off: Jev puts
+OpenRouter on the recall path (an OpenRouter outage makes recall fail, where the
+reranker path would only lose consolidation triage).
 
 ### Features enabled
 

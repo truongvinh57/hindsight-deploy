@@ -103,11 +103,10 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_DECISION_MODEL_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required - cp .env.example .env and fill it}
   HINDSIGHT_API_DECISION_MODEL_MODEL: typesafe/jev-1.14
   HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT: "${DECISION_MODEL_MAX_CONCURRENT:-8}"
-  # With a decision model, recall would rank with Jev instead of the reranker.
-  # Keep Qwen3-Reranker on the recall path and let Jev do what only it does
-  # (consolidation triage, knowledge-page impact). Flip to `typesafe` to rank
-  # recall with Jev instead.
-  HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: none
+  # A/B in progress: recall ranks with Qwen3-Reranker (cohere provider below)
+  # or with Jev. `none` = the reranker; `typesafe` = Jev's help-vs-distract
+  # ranking (see docs/decisions.md section 13 for the measurements).
+  HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: typesafe
 
   # ── Multi-user: static keys, one Postgres schema per user ──────────────
   HINDSIGHT_API_TENANT_EXTENSION: hindsight_ext_static_keys_tenant:StaticKeysTenantExtension

@@ -288,3 +288,62 @@ All six observed rerank calls returned `top=0.9974…1.0000` — Qwen3-Reranker'
 yes-probability saturates on short facts. That is fine for ordering, but do not
 set `min_scores.rerank` thresholds from these numbers without measuring on a
 larger candidate set.
+
+## 13. Recall ranker: Jev vs Qwen3-Reranker (measured, then switched to Jev)
+
+The question was whether recall should rank with the decision model (Jev, asked
+"would showing this memory help rather than distract?") or with the cross-encoder
+(Qwen3-Reranker). Both were measured on the same inputs, not argued about.
+
+### Synthetic pool, 30 candidates, query "làm sao để backup database hindsight?"
+
+| candidate | Qwen3 rank | Jev rank |
+|---|---|---|
+| "pg_dump -Fc để sao lưu…" | 1 | 1 |
+| "backup nên kiểm tra bằng restore thử" | 6 | **2** |
+| "pg_dump nén -Fc" | 4 | 4 |
+| **"KHÔNG cần backup vì dữ liệu tái tạo được"** | **2** (0.9823) | **15** (0.21) |
+| "mỗi user có schema riêng" (topical noise) | 10 | **3** |
+| "user thích trả lời ngắn gọn" (junk) | **21** | 10 |
+
+Qwen3 separates junk more sharply (0.9997 down to 7e-06) but scores a negated,
+superseded fact at 0.98. Jev drops the negation to rank 15 and lifts the
+"verify your backups" fact to rank 2, at the cost of letting topical noise into
+the top 10 — the pool-relative calibration the upstream comments warn about.
+
+Cost and latency, 30 candidates: Qwen3 1 195 ms / \$0.0000278 per recall, Jev
+763 ms / \$0.0000767 (~2.8x). At 300 candidates Jev is ~\$0.0008 per recall.
+Also: Jev returns **rank positions**, so `min_scores.reranker` is rejected (400)
+for that provider; Qwen3 returns calibrated scores where a floor is possible.
+
+### Real bank, same recall before/after the switch
+
+Seeded six items into a scratch bank, including a superseded decision ("không cần
+backup database vì dữ liệu có thể tái tạo từ log"), then recalled "có cần backup
+database không?" with each ranker:
+
+| rank | Qwen3-Reranker | Jev |
+|---|---|---|
+| 1 | superseded "không cần backup" fact | **the rule: back up daily with pg_dump** |
+| 2 | the "was rejected" observation | the same rule (chunk) |
+| 3 | the rule: back up daily with pg_dump | the "was rejected" observation |
+| 4 | the rule (chunk) | restore procedure |
+| 8 | restore procedure | superseded "không cần backup" fact |
+
+That settled it: for a memory bank, the reader needs the current rule first, and
+the superseded decision is context, not the answer. Jev put the answer at #1 and
+the stale decision at #8; Qwen3 did the opposite. Latency on the real recall was
+1 119 ms (Jev) against 1 100 ms (Qwen3).
+
+### What changed
+
+`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: typesafe`. The reranker stays
+wired for a one-line rollback (`none`) and is still used by nothing else, which
+is why it remains in the compose file rather than being deleted: the rollback is
+a config flip, not a re-add.
+
+Reliability note: Jev raises on failure (upstream no longer degrades silently), and
+`reranking.py` only catches its own timeout, so an OpenRouter outage makes recall
+fail outright. With the reranker on recall, an OpenRouter outage would only cost
+consolidation triage — that is the price of the better ranking, stated here so it
+is a decision and not a surprise.
