@@ -83,6 +83,17 @@ docker compose up -d
 docker compose ps
 ```
 
+> **On a machine that uses the local embedder** (this one does — `.env` has
+> `EMBEDDINGS_BASE_URL=http://bge-m3:8000/v1`), always bring the stack up with
+> the profile, or the API starts without an embedding backend:
+>
+> ```bash
+> docker compose --profile local-embed up -d
+> ```
+>
+> Machines without a GPU leave those two lines out of `.env` and use
+> `docker compose up -d`.
+
 | Endpoint | URL |
 |---|---|
 | API | http://localhost:8888 |
@@ -242,6 +253,8 @@ Windows 11 + Docker Desktop, RTX 5070 Ti 16 GB, Docker 29.9 / Compose 5.6.
 | Audit log | 9 rows: `retain`, `recall`, `consolidation`, `webhook_delivery` |
 | Webhooks | sink received signed `POST /hindsight` with `x-hindsight-signature` + `consolidation.completed` body, 200 OK |
 | Smoke test | `scripts/smoke-test.ps1` -> all checks passed |
+| Local embeddings | `bge-m3` profile: vLLM returned `dim = 1024`, `model = bge-m3`; vLLM saw 4 `POST /v1/embeddings` per retain+recall |
+| Failover model | DeepInfra `deepseek-ai/DeepSeek-V4.1-Flash-1017` answered `pong` over `/v1/openai/chat/completions` |
 
 ---
 
@@ -255,14 +268,23 @@ docker compose --profile local-embed up -d bge-m3
 #   EMBEDDINGS_API_KEY=local
 docker compose up -d api worker
 
-# local Qwen3-Reranker (vLLM, Cohere-compatible /v1/rerank)
-docker compose --profile local-rerank up -d reranker
-# then in .env:  RERANKER_PROVIDER=cohere
+# switch embeddings back to the cloud backend:
+#   comment out EMBEDDINGS_BASE_URL / EMBEDDINGS_API_KEY in .env
 docker compose up -d api worker
 ```
 
-Both services are defined in `docker-compose.yml` under the `local-embed` /
-`local-rerank` profiles, so they are inert until you ask for them.
+The `bge-m3` service is defined in `docker-compose.yml` under the `local-embed`
+profile, so it is inert until you ask for it. It is **verified working** on this
+machine (RTX 5070 Ti): vLLM 0.31 serves `BAAI/bge-m3` through
+`/v1/embeddings` at 1024 dims, and Hindsight's traces show every embedding
+call hitting it.
+
+**Local reranker: not wired, on purpose.** vLLM 0.31 serves Qwen3-Reranker with
+`--runner pooling --convert classify`, but that exposes `/classify` and
+`/pooling` — not the Cohere-compatible `/v1/rerank` that Hindsight's reranker
+providers speak (verified: `/v1/rerank`, `/rerank` and `/v1/score` all 404 on
+that build). Use the OpenRouter reranker (default, working) or add a TEI
+container serving `BAAI/bge-reranker-v2-m3` (TEI has a native `/rerank`).
 
 Adapters live in `bge-m3/` (vendored from
 `truongvinh57/bge-m3-deploy`, adapted from 2×GPU to 1×GPU and to expose the

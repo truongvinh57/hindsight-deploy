@@ -10,7 +10,6 @@
 #   control-plane admin UI       :9999
 #   webhook-sink  receives Hindsight webhook deliveries (JSON echo, for inspection)
 #   bge-m3        local vLLM BGE-M3 embeddings  (profile: local-embed)
-#   reranker      local vLLM Qwen3-Reranker     (profile: local-rerank)
 #
 # Secrets live in .env (gitignored). Everything else is versioned right here.
 
@@ -61,10 +60,6 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
   HINDSIGHT_API_RERANKER_OPENROUTER_MODEL: ${RERANKER_MODEL:-cohere/rerank-v3.5}
   HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "300"
-  # Only read when RERANKER_PROVIDER=cohere (local vLLM profile); ignored otherwise.
-  HINDSIGHT_API_RERANKER_COHERE_BASE_URL: ${RERANKER_COHERE_BASE_URL:-http://reranker:8000/v1/rerank}
-  HINDSIGHT_API_RERANKER_COHERE_API_KEY: ${RERANKER_COHERE_API_KEY:-local}
-  HINDSIGHT_API_RERANKER_COHERE_MODEL: ${RERANKER_COHERE_MODEL:-qwen3-reranker}
 
   # ── Decision model: Jev 1.14 (TypeSafe System One via OpenRouter) ───────
   HINDSIGHT_API_DECISION_MODEL_PROVIDER: typesafe
@@ -210,7 +205,8 @@ services:
       - "--model"
       - "BAAI/bge-m3"
       - "--served-model-name"
-      - "bge-m3"
+      # Same id DeepInfra serves, so switching backends needs no config change.
+      - "BAAI/bge-m3"
       - "--runner"
       - "pooling"
       - "--dtype"
@@ -221,34 +217,6 @@ services:
       - "0.30"
       - "--max-num-seqs"
       - "32"
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-
-  reranker:
-    profiles: ["local-rerank"]
-    image: vllm/vllm-openai:v0.31.0
-    restart: unless-stopped
-    ipc: host
-    shm_size: "8gb"
-    command:
-      - "--model"
-      - "Qwen/Qwen3-Reranker-0.6B"
-      - "--served-model-name"
-      - "qwen3-reranker"
-      - "--runner"
-      - "pooling"
-      - "--dtype"
-      - "bfloat16"
-      - "--max-model-len"
-      - "8192"
-      - "--gpu-memory-utilization"
-      - "0.12"
     volumes:
       - hf-cache:/root/.cache/huggingface
     deploy:

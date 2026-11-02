@@ -123,3 +123,30 @@ network, so that variable lists `webhook-sink` and the compose CIDR
 (`172.16.0.0/12`). Deliveries are signed with `WEBHOOK_SECRET` (HMAC) and can be
 inspected at http://localhost:8087. Replace the sink with a real receiver by
 changing `HINDSIGHT_API_WEBHOOK_URL` and narrowing the allowlist.
+
+## 9. Local embeddings verified; local reranker rejected on evidence
+
+`bge-m3` (profile `local-embed`) was brought up on the RTX 5070 Ti:
+
+- Blackwell works with the pinned image: `vllm/vllm-openai:v0.31.0` loads
+  BGE-M3 with FlashAttention 2 on sm_120.
+- `POST /v1/embeddings` returns `{\"model\":\"bge-m3\", dim = 1024}`.
+- One trap cost a startup: vLLM validates the `model` field against
+  `--served-model-name`. Serving it as `bge-m3` while Hindsight asked for
+  `BAAI/bge-m3` produced
+  `openai.NotFoundError: 404 The model 'BAAI/bge-m3' does not exist` and the API
+  refused to start. `--served-model-name BAAI/bge-m3` (the id DeepInfra also
+  uses) fixes it and keeps one config for both backends.
+
+Reranker, tested and rejected for the local stack:
+
+- `--runner pooling` alone: engine core fails to initialise (generative
+  architecture, no pooler).
+- `--task score`: rejected — `vllm: error: unrecognized arguments: --task score`;
+  the CLI hint says to use `--runner pooling --convert classify|reward`.
+- `--runner pooling --convert classify`: loads, but the HTTP surface is
+  `/classify` + `/pooling` only — `/v1/rerank`, `/rerank` and `/v1/score`
+  all return 404, so Hindsight has nothing to call.
+- Conclusion: keep OpenRouter `cohere/rerank-v3.5` (verified 200) or add a TEI
+  container with a native `/rerank`. The vLLM reranker service was removed from
+  the compose file rather than shipped broken.

@@ -12,7 +12,7 @@ model on a single GPU**, and changed so the embedding endpoint is the
 | 2× `vllm serve` (one per GPU) + HAProxy LB | 1 instance per model, no LB | this machine has one GPU (RTX 5070 Ti, 16 GB) |
 | `--io-processor-plugin bge_m3_sparse_plugin` (custom `/pooling` task, `/v1/embeddings` = 501) | plugin removed → plain pooling model exposing `/v1/embeddings` | Hindsight's embeddings provider is OpenAI-compatible; it cannot call `/pooling` |
 | `--gpu-memory-utilization 0.20` (sharing the card with MinerU) | 0.30 each, tuned for a card with no other tenant | no MinerU here |
-| ports bound to 127.0.0.1 | bound to the compose network only | Hindsight reaches them by service name |
+| ports bound to 127.0.0.1 | bound to the compose network only | Hindsight reaches it by service name |
 
 ## Services
 
@@ -35,30 +35,38 @@ Hindsight then talks to `http://bge-m3:8000/v1/embeddings` with
 the same weights DeepInfra serves, so the vector space (and therefore existing
 memories) is unchanged when you switch backends.
 
-### `reranker` — Qwen3-Reranker-0.6B (profile `local-rerank`)
+### Reranker: not served by this stack (finding)
 
-```yaml
-command: >
-  vllm serve Qwen/Qwen3-Reranker-0.6B
-  --runner pooling
-  --served-model-name qwen3-reranker
-  --dtype bfloat16
-  --gpu-memory-utilization 0.10
-  --max-model-len 8192
+vLLM 0.31 will load Qwen3-Reranker — `--runner pooling --convert classify`
+(plain `--runner pooling` fails to initialise, and `--task score` is rejected
+outright) — but the server it exposes has **no Cohere-compatible rerank route**:
+
+```
+GET /openapi.json -> /classify, /pooling, /v1/models, /health, ...   (no /v1/rerank)
+POST /v1/rerank   -> 404
+POST /rerank      -> 404
+POST /v1/score    -> 404
 ```
 
-Hindsight reaches it with `HINDSIGHT_API_RERANKER_PROVIDER=cohere` and
-`HINDSIGHT_API_RERANKER_COHERE_BASE_URL=http://reranker:8000/v1/rerank`, which
-speaks the Cohere wire format.
+Hindsight's reranker providers speak either the Cohere `/rerank` wire format or
+TEI's, so a Qwen3-Reranker behind this vLLM build cannot be wired without a
+translation adapter. The default deployment therefore uses the **OpenRouter
+reranker** (`cohere/rerank-v3.5`, verified 200 with `results[].relevance_score`).
 
-> **Verify before relying on it.** Whether a given vLLM build serves
-> Qwen3-Reranker through `/v1/rerank` depends on its pooling/score support. The
-> check is one command:
-> `curl -s -X POST http://localhost:8201/v1/rerank -H 'Content-Type: application/json'
->  -d '{"model":"qwen3-reranker","query":"xin chào","documents":["hello","goodbye"]}'`
-> A 200 with `results[].relevance_score` means it works. If it does not, keep the
-> OpenRouter reranker (default) or switch to TEI with
-> `BAAI/bge-reranker-v2-m3`.
+If you want the reranker on-premises anyway, the supported route is TEI:
+
+```bash
+docker run --gpus all -p 8080:80 -v $PWD/data:/data --pull always \
+  ghcr.io/huggingface/text-embeddings-inference:1.8 \
+  --model-id BAAI/bge-reranker-v2-m3
+```
+
+then `HINDSIGHT_API_RERANKER_PROVIDER=tei` and
+`HINDSIGHT_API_RERANKER_TEI_URL=http://your-host:8080`.
+
+Note that with the decision model enabled, recall ranks candidates with **Jev**,
+not with a cross-encoder at all — so the reranker only matters for operations
+that do not use a decision model.
 
 ## GPU / driver notes
 
