@@ -1,0 +1,263 @@
+# Hindsight — self-hosted, multi-user, full-feature stack
+#
+# Images are upstream release artifacts (pinned). Nothing is built here: the
+# multi-user tenant extension is mounted into the running server instead of
+# baked into a derived image.
+#
+#   db            postgres + pgvector
+#   api           hindsight API  :8888  (no internal worker)
+#   worker        hindsight worker       (consolidation / mental models)
+#   control-plane admin UI       :9999
+#   webhook-sink  receives Hindsight webhook deliveries (JSON echo, for inspection)
+#   bge-m3        local vLLM BGE-M3 embeddings  (profile: local-embed)
+#   reranker      local vLLM Qwen3-Reranker     (profile: local-rerank)
+#
+# Secrets live in .env (gitignored). Everything else is versioned right here.
+
+name: hindsight
+
+# ── Shared configuration for API and worker ────────────────────────────────
+x-hindsight-env: &hindsight-env
+  PYTHONPATH: /app/extensions
+  # Database
+  HINDSIGHT_API_DATABASE_URL: postgresql://${POSTGRES_USER:-hindsight}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-hindsight}
+  HINDSIGHT_API_DATABASE_SCHEMA: public
+  HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP: "true"
+  HINDSIGHT_API_DB_POOL_MIN_SIZE: "5"
+  HINDSIGHT_API_DB_POOL_MAX_SIZE: "40"
+
+  # ── LLM: DeepSeek primary, DeepInfra failover (multi-LLM strategy) ──────
+  HINDSIGHT_API_LLM_PROVIDER: deepseek
+  HINDSIGHT_API_LLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
+  HINDSIGHT_API_LLM_MODEL: deepseek-flash
+  HINDSIGHT_API_LLM_BASE_URL: https://api.deepseek.com
+  HINDSIGHT_API_LLM_TIMEOUT: "300"
+  HINDSIGHT_API_LLM_MAX_CONCURRENT: "8"
+  HINDSIGHT_API_LLM_STRATEGY: '{"mode": "failover"}'
+  HINDSIGHT_API_LLM_1_PROVIDER: openai
+  HINDSIGHT_API_LLM_1_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
+  HINDSIGHT_API_LLM_1_BASE_URL: https://api.deepinfra.com/v1/openai
+  HINDSIGHT_API_LLM_1_MODEL: deepseek-ai/DeepSeek-V4.1-Flash-1017
+  # Vision slot: deepseek-flash is multimodal (text+image), so retain chunks
+  # carrying screenshots go to it instead of being refused.
+  HINDSIGHT_API_VLM_PROVIDER: deepseek
+  HINDSIGHT_API_VLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
+  HINDSIGHT_API_VLM_MODEL: deepseek-flash
+
+  # ── Embeddings: BAAI/bge-m3, 1024-dim, OpenAI-compatible ───────────────
+  # Default backend is DeepInfra; switch EMBEDDINGS_BASE_URL to
+  # http://bge-m3:8000/v1 (profile local-embed) for the local vLLM server.
+  # Same model weights either way, so vectors stay comparable.
+  HINDSIGHT_API_EMBEDDINGS_PROVIDER: openai
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${EMBEDDINGS_API_KEY:-${DEEPINFRA_API_KEY:?}}
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://api.deepinfra.com/v1/openai}
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${EMBEDDINGS_MODEL:-BAAI/bge-m3}
+  HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE: "32"
+  HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS: "8192"
+  HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS: "8"
+
+  # ── Reranker: Cohere rerank-v3.5 through OpenRouter ─────────────────────
+  HINDSIGHT_API_RERANKER_PROVIDER: ${RERANKER_PROVIDER:-openrouter}
+  HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
+  HINDSIGHT_API_RERANKER_OPENROUTER_MODEL: ${RERANKER_MODEL:-cohere/rerank-v3.5}
+  HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "300"
+  # Only read when RERANKER_PROVIDER=cohere (local vLLM profile); ignored otherwise.
+  HINDSIGHT_API_RERANKER_COHERE_BASE_URL: ${RERANKER_COHERE_BASE_URL:-http://reranker:8000/v1/rerank}
+  HINDSIGHT_API_RERANKER_COHERE_API_KEY: ${RERANKER_COHERE_API_KEY:-local}
+  HINDSIGHT_API_RERANKER_COHERE_MODEL: ${RERANKER_COHERE_MODEL:-qwen3-reranker}
+
+  # ── Decision model: Jev 1.14 (TypeSafe System One via OpenRouter) ───────
+  HINDSIGHT_API_DECISION_MODEL_PROVIDER: typesafe
+  HINDSIGHT_API_DECISION_MODEL_BASE_URL: https://openrouter.ai/api
+  HINDSIGHT_API_DECISION_MODEL_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
+  HINDSIGHT_API_DECISION_MODEL_MODEL: typesafe/jev-1.14
+  HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT: "24"
+
+  # ── Multi-user: static keys, one Postgres schema per user ──────────────
+  HINDSIGHT_API_TENANT_EXTENSION: hindsight_ext_static_keys_tenant:StaticKeysTenantExtension
+  HINDSIGHT_API_TENANT_SCHEMA_PREFIX: user
+  HINDSIGHT_API_TENANT_USERS: "hermes-agent:${HERMES_API_KEY:?HERMES_API_KEY is required},deepseek-harness:${DEEPSEEK_HARNESS_API_KEY:?DEEPSEEK_HARNESS_API_KEY is required}"
+
+  # ── Full-feature switches ───────────────────────────────────────────────
+  HINDSIGHT_API_ENABLE_OBSERVATIONS: "true"
+  HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION: "true"
+  HINDSIGHT_API_MCP_ENABLED: "true"
+  HINDSIGHT_API_ENABLE_BANK_CONFIG_API: "true"
+  HINDSIGHT_API_AUDIT_LOG_ENABLED: "true"
+  HINDSIGHT_API_AUDIT_LOG_RETENTION_DAYS: "90"
+  HINDSIGHT_API_LLM_TRACE_ENABLED: "true"
+  HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS: "14"
+  HINDSIGHT_API_FILE_STORAGE_TYPE: native
+  HINDSIGHT_API_DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+  HINDSIGHT_API_TEXT_SEARCH_EXTENSION: native
+  HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE: simple
+  HINDSIGHT_API_OPERATION_RETENTION_DAYS: "30"
+  HINDSIGHT_API_METRICS_BACKLOG_ENABLED: "true"
+
+  # ── Webhooks ────────────────────────────────────────────────────────────
+  HINDSIGHT_API_WEBHOOK_URL: http://webhook-sink:8080/hindsight
+  HINDSIGHT_API_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+  HINDSIGHT_API_WEBHOOK_EVENT_TYPES: consolidation.completed,memory_defense.triggered
+  # SSRF guard: allow the compose network (the sink is private by design).
+  HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS: webhook-sink,172.16.0.0/12
+
+  # ── Logging / worker tuning ─────────────────────────────────────────────
+  HINDSIGHT_API_LOG_LEVEL: info
+  HINDSIGHT_API_LOG_FORMAT: json
+  HINDSIGHT_API_WORKER_POLL_INTERVAL_MS: "500"
+  HINDSIGHT_API_WORKER_MAX_SLOTS: "10"
+  HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS: "2"
+
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hindsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-hindsight}
+    volumes:
+      - pgdata:/var/lib/postgresql/18/docker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hindsight} -d ${POSTGRES_DB:-hindsight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Uncomment to inspect the database from the host:
+    # ports: ["5433:5432"]
+
+  api:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    restart: unless-stopped
+    stop_grace_period: 75s
+    environment:
+      <<: *hindsight-env
+      HINDSIGHT_ENABLE_API: "true"
+      HINDSIGHT_ENABLE_CP: "false"
+      HINDSIGHT_API_WORKER_ENABLED: "false"
+      HINDSIGHT_API_WORKER_ID: hindsight-api-1
+    volumes:
+      - ./extensions:/app/extensions:ro
+    ports:
+      - "${HINDSIGHT_API_PORT:-8888}:8888"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # The runtime image ships no curl; probe over the venv's python instead.
+      test: ["CMD", "/app/api/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8888/health', timeout=8).status==200 else 1)"]
+      interval: 15s
+      timeout: 12s
+      retries: 20
+      start_period: 180s
+
+  worker:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    restart: unless-stopped
+    stop_grace_period: 75s
+    command: ["hindsight-worker"]
+    environment:
+      <<: *hindsight-env
+      HINDSIGHT_API_WORKER_ID: hindsight-worker-1
+      HINDSIGHT_API_WORKER_HTTP_PORT: "8889"
+    volumes:
+      - ./extensions:/app/extensions:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/api/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8889/health', timeout=8).status==200 else 1)"]
+      interval: 30s
+      timeout: 12s
+      retries: 10
+      start_period: 120s
+
+  control-plane:
+    image: ghcr.io/vectorize-io/hindsight-control-plane:1.1.0
+    restart: unless-stopped
+    environment:
+      HINDSIGHT_CP_DATAPLANE_API_URL: http://api:8888
+      HINDSIGHT_CP_DATAPLANE_API_KEY: ${HERMES_API_KEY:?HERMES_API_KEY is required}
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?HINDSIGHT_CP_ACCESS_KEY is required}
+    ports:
+      - "${HINDSIGHT_CP_PORT:-9999}:9999"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  webhook-sink:
+    image: mendhak/http-https-echo:35
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: "8080"
+      LOG_WITHOUT_NEWLINE: "true"
+    ports:
+      - "${WEBHOOK_SINK_PORT:-8087}:8080"
+
+  # ── Optional local GPU backends (not started by default) ────────────────
+  # Enable with:  docker compose --profile local-embed up -d bge-m3
+  #               docker compose --profile local-rerank up -d reranker
+  # Then point .env at them (see bge-m3/README.md). Same weights as the
+  # DeepInfra/OpenRouter defaults, so switching does not invalidate vectors.
+  bge-m3:
+    profiles: ["local-embed"]
+    image: vllm/vllm-openai:v0.31.0
+    restart: unless-stopped
+    ipc: host
+    shm_size: "8gb"
+    command:
+      - "--model"
+      - "BAAI/bge-m3"
+      - "--served-model-name"
+      - "bge-m3"
+      - "--runner"
+      - "pooling"
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.30"
+      - "--max-num-seqs"
+      - "32"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  reranker:
+    profiles: ["local-rerank"]
+    image: vllm/vllm-openai:v0.31.0
+    restart: unless-stopped
+    ipc: host
+    shm_size: "8gb"
+    command:
+      - "--model"
+      - "Qwen/Qwen3-Reranker-0.6B"
+      - "--served-model-name"
+      - "qwen3-reranker"
+      - "--runner"
+      - "pooling"
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.12"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+volumes:
+  pgdata:
+  hf-cache:

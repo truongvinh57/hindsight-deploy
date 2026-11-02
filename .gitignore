@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+*.env.local
+secrets.generated.json
+
+# Local data / logs
+data/
+logs/
+*.log
+webhook-sink.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
