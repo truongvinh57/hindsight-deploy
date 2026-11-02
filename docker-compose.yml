@@ -4,12 +4,12 @@
 # multi-user tenant extension is mounted into the running server instead of
 # baked into a derived image.
 #
-#   db            postgres + pgvector
-#   api           hindsight API  :8888  (no internal worker)
-#   worker        hindsight worker       (consolidation / mental models)
-#   control-plane admin UI       :9999
-#   webhook-sink  receives Hindsight webhook deliveries (JSON echo, for inspection)
-#   bge-m3        local vLLM BGE-M3 embeddings  (profile: local-embed)
+#   db             postgres + pgvector
+#   api            hindsight API  :8888  (no internal worker)
+#   worker         hindsight worker       (consolidation / mental models)
+#   control-plane  admin UI       :9999
+#   webhook-sink   receives Hindsight webhook deliveries (JSON echo, for inspection)
+#   rerank-adapter Cohere /rerank -> DeepInfra inference API (Qwen3-Reranker)
 #
 # Secrets live in .env (gitignored). Everything else is versioned right here.
 
@@ -231,44 +231,5 @@ services:
       retries: 5
       start_period: 15s
 
-  # ── OPTIONAL: local GPU embeddings (NOT used by the default stack) ──────
-  # The stack embeds with Qwen3-Embedding-0.6B on DeepInfra; this profile is a
-  # documented fallback for offline/no-cloud use, NOT a drop-in swap: BGE-M3 and
-  # Qwen3 are different vector spaces, so switching in EITHER direction requires
-  # re-ingesting every memory (the width is 1024 for both, so Hindsight will not
-  # warn). Start it with:  docker compose --profile local-embed up -d bge-m3
-  # and see bge-m3/README.md, including the --served-model-name trap.
-  bge-m3:
-    profiles: ["local-embed"]
-    image: vllm/vllm-openai:v0.31.0
-    restart: unless-stopped
-    ipc: host
-    shm_size: "8gb"
-    command:
-      - "--model"
-      - "BAAI/bge-m3"
-      - "--served-model-name"
-      # Same id DeepInfra serves, so switching backends needs no config change.
-      - "BAAI/bge-m3"
-      - "--runner"
-      - "pooling"
-      - "--dtype"
-      - "bfloat16"
-      - "--max-model-len"
-      - "8192"
-      - "--gpu-memory-utilization"
-      - "0.30"
-      - "--max-num-seqs"
-      - "32"
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-
 volumes:
   pgdata:
-  hf-cache:

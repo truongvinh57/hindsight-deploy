@@ -50,7 +50,11 @@ Failover uses Hindsight's documented multi-LLM strategy:
 OpenAI-compatible base URL (`https://api.deepinfra.com/v1/openai`) and model
 `deepseek-ai/DeepSeek-V4.1-Flash-1017`, which `GET /v1/models` confirms exists.
 
-## 4. Embeddings: BAAI/bge-m3 (1024-dim), not the default 384-dim model
+## 4. Embeddings, first pass: BAAI/bge-m3 (1024-dim) — superseded by section 11
+
+*Kept as history: this is why the schema was moved off the 384-dim default.
+Section 11 replaced BGE-M3 with Qwen3-Embedding-0.6B and removed the local
+service entirely.*
 
 Hindsight's default local embedder is `bge-small-en-v1.5` (384 dims) which is
 English-centric — wrong tool for Vietnamese memory content. BGE-M3 is
@@ -101,9 +105,9 @@ the adapter logged `docs=2 top=0.9997 took_ms=1045 cost=$0.0000024`.
 The earlier OpenRouter `cohere/rerank-v3.5` route also works (HTTP 200,
 `results[].relevance_score`) and remains the fallback if the adapter is dropped.
 
-A local Qwen3-Reranker remains available as a profile (`local-rerank`), served
-by vLLM and wired through Hindsight's Cohere-compatible provider; see
-`bge-m3/README.md`.
+A local reranker was evaluated and dropped: vLLM 0.31 exposes `/classify` for
+Qwen3-Reranker, not a Cohere/TEI `/rerank`, so Hindsight has nothing to call
+(section 9). Nothing is hosted locally today.
 
 ## 6. Decision model: Jev 1.14 through OpenRouter's System One API
 
@@ -142,7 +146,7 @@ changing `HINDSIGHT_API_WEBHOOK_URL` and narrowing the allowlist.
 
 ## 9. Local embeddings verified; reranker stays remote (DeepInfra)
 
-`bge-m3` (profile `local-embed`) was brought up on the RTX 5070 Ti:
+`bge-m3` (since removed from the compose file) was brought up on the RTX 5070 Ti:
 
 - Blackwell works with the pinned image: `vllm/vllm-openai:v0.31.0` loads
   BGE-M3 with FlashAttention 2 on sm_120.
@@ -221,5 +225,7 @@ What the switch required (and what any future embedding change requires):
 
 Remaining trade-off, stated plainly: Hindsight's embedding provider has **no
 failover chain** (LLM and reranker do). DeepInfra being unreachable stops
-retain/recall. The `bge-m3` profile is kept in the compose file as the offline
-fallback for exactly that scenario.
+retain/recall. If that ever matters more than the 32 GB, the local recipe is in
+`truongvinh57/bge-m3-deploy` and in this repo's history — but re-enabling it is a
+re-ingest, not a config toggle, so it was removed from the compose file rather
+than left as a trap.

@@ -252,28 +252,28 @@ Windows 11 + Docker Desktop, RTX 5070 Ti 16 GB, Docker 29.9 / Compose 5.6.
 
 ---
 
-## 8. Local GPU backend (optional, offline fallback)
+## 8. No local models in this repo
 
-The default stack needs **no GPU**: embeddings are `Qwen/Qwen3-Embedding-0.6B` on
-DeepInfra. A local vLLM BGE-M3 service still exists as a documented fallback for
-offline or quota-constrained use:
+Embeddings and reranking are both remote, so the stack runs on any machine with
+Docker and **no GPU**:
 
-```bash
-docker compose --profile local-embed up -d bge-m3     # pulls ~32 GB on first use
-# then in .env:
-#   EMBEDDINGS_BASE_URL=http://bge-m3:8000/v1
-#   EMBEDDINGS_MODEL=BAAI/bge-m3
-docker compose up -d api worker
-```
+| Stage | Where it runs |
+|---|---|
+| Embeddings | `Qwen/Qwen3-Embedding-0.6B` on DeepInfra |
+| Reranking | `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, via `rerank-adapter` |
+| LLM | `deepseek-flash` on DeepSeek, failover to DeepInfra |
 
-> **This is not a drop-in swap.** BGE-M3 and Qwen3-Embedding are different vector
-> spaces held at the same 1024 width, so Hindsight cannot detect the change: every
-> stored memory must be re-ingested when you switch in **either** direction, and
-> the query instruction below must be cleared for BGE-M3. See
-> `bge-m3/README.md`, including the `--served-model-name` trap that stops the API
-> from booting.
+Hosting BGE-M3 locally was tried and removed on purpose: it cost a 32 GB image,
+a 3.5 GB weight volume, 4.4 GB VRAM and a 60-135 s cold start, and it protected
+nothing that was not already leaving the machine (retain sends content to
+DeepSeek, recall sends candidates to DeepInfra). The recipe still lives in
+`truongvinh57/bge-m3-deploy` and in this repo's git history if you ever want it
+back — but note it is **not** a drop-in swap: BGE-M3 and Qwen3-Embedding are
+different vector spaces at the same 1024 width, so Hindsight would not notice
+and every memory would need re-ingesting.
 
-**Reranker is not hosted here at all** — it is DeepInfra's Qwen3-Reranker-0.6B,
+**Reranker is remote too** — DeepInfra's Qwen3-Reranker-0.6B, reached through
+`rerank-adapter`: — it is DeepInfra's Qwen3-Reranker-0.6B,
 reached through `rerank-adapter`:
 
 ```
@@ -293,9 +293,7 @@ To move reranking back to OpenRouter, set
 use TEI with `BAAI/bge-reranker-v2-m3` (native `/rerank`) and
 `HINDSIGHT_API_RERANKER_PROVIDER=tei`.
 
-The adapter lives in `adapters/deepinfra-rerank/`. The local embedding recipe in
-`bge-m3/` is the adaptation of `truongvinh57/bge-m3-deploy` (2×GPU + HAProxy ->
-1×GPU, dense-only, OpenAI-compatible route) and is only used by that fallback.
+The adapter lives in `adapters/deepinfra-rerank/`.
 
 ---
 
@@ -322,7 +320,6 @@ hindsight-deploy/
 ├── .env.example              # template
 ├── extensions/               # vendored static-keys tenant extension (MIT)
 ├── adapters/deepinfra-rerank/ # Cohere /rerank -> DeepInfra translation (stdlib)
-├── bge-m3/                   # OPTIONAL local vLLM BGE-M3 fallback (off by default)
 ├── scripts/                  # smoke tests, key minting
 └── docs/decisions.md         # why each choice was made, with evidence
 ```
