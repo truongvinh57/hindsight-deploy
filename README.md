@@ -13,8 +13,9 @@ machine, configuration in git, secrets in a gitignored `.env`.
 - Embeddings: **BAAI/bge-m3** (1024-dim) — DeepInfra by default, local vLLM on
   the GPU when the `local-embed` profile is on. Same weights either way, so
   switching backends does not require re-indexing.
-- Reranker: **Cohere `rerank-v3.5`** through OpenRouter (or local vLLM
-  Qwen3-Reranker with the `local-rerank` profile).
+- Reranker: **`Qwen/Qwen3-Reranker-0.6B`** on DeepInfra, through a small
+  stdlib `rerank-adapter` that translates Cohere `/rerank` to DeepInfra's
+  inference API (no model hosted, no image built).
 - Decision model: **Jev 1.14** (`typesafe/jev-1.14`) through OpenRouter's
   System One API.
 
@@ -48,7 +49,7 @@ machine, configuration in git, secrets in a gitignored `.env`.
 ```
 
 External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover + embeddings),
-OpenRouter (reranker + Jev decision model).
+DeepInfra (reranker via `rerank-adapter`), OpenRouter (Jev decision model).
 
 **Why nothing is built locally:** the multi-user tenant extension
 (`hindsight-extensions/static-keys-tenant`) is not published to PyPI, but the
@@ -164,7 +165,7 @@ anchor (shared by API and worker). Secrets and per-machine overrides are in
 | LLM failover | `HINDSIGHT_API_LLM_1_*` + `LLM_STRATEGY` | `openai` provider pointed at DeepInfra, `{"mode":"failover"}` |
 | Vision | `HINDSIGHT_API_VLM_*` | `deepseek` / `deepseek-flash` (text+image) |
 | Embeddings | `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` | `BAAI/bge-m3`, 1024 dims |
-| Reranker | `HINDSIGHT_API_RERANKER_OPENROUTER_*` | `cohere/rerank-v3.5` |
+| Reranker | `HINDSIGHT_API_RERANKER_COHERE_*` -> `rerank-adapter` | `Qwen/Qwen3-Reranker-0.6B` (DeepInfra) |
 | Decision model | `HINDSIGHT_API_DECISION_MODEL_*` | `typesafe` provider, base `https://openrouter.ai/api`, model `typesafe/jev-1.14` |
 
 The decision model is the subtle one: Jev is not a chat model. Hindsight's
@@ -255,6 +256,7 @@ Windows 11 + Docker Desktop, RTX 5070 Ti 16 GB, Docker 29.9 / Compose 5.6.
 | Smoke test | `scripts/smoke-test.ps1` -> all checks passed |
 | Local embeddings | `bge-m3` profile: vLLM returned `dim = 1024`, `model = bge-m3`; vLLM saw 4 `POST /v1/embeddings` per retain+recall |
 | Failover model | DeepInfra `deepseek-ai/DeepSeek-V4.1-Flash-1017` answered `pong` over `/v1/openai/chat/completions` |
+| Reranker | recall trace: `rerank | cohere | Qwen/Qwen3-Reranker-0.6B | success`; adapter log `docs=2 top=0.9997 took_ms=1045 cost=$0.0000024` |
 
 ---
 
@@ -279,12 +281,25 @@ machine (RTX 5070 Ti): vLLM 0.31 serves `BAAI/bge-m3` through
 `/v1/embeddings` at 1024 dims, and Hindsight's traces show every embedding
 call hitting it.
 
-**Local reranker: not wired, on purpose.** vLLM 0.31 serves Qwen3-Reranker with
-`--runner pooling --convert classify`, but that exposes `/classify` and
-`/pooling` — not the Cohere-compatible `/v1/rerank` that Hindsight's reranker
-providers speak (verified: `/v1/rerank`, `/rerank` and `/v1/score` all 404 on
-that build). Use the OpenRouter reranker (default, working) or add a TEI
-container serving `BAAI/bge-reranker-v2-m3` (TEI has a native `/rerank`).
+**Reranker is not hosted here at all** — it is DeepInfra's Qwen3-Reranker-0.6B,
+reached through `rerank-adapter`:
+
+```
+Hindsight --(Cohere /rerank)--> rerank-adapter --(DeepInfra inference API)--> Qwen3-Reranker-0.6B
+```
+
+DeepInfra's contract is `POST /v1/inference/<model>` with
+`{"queries": [...], "documents": [...]}` and a flat `{"scores": [...]}` reply —
+not the Cohere shape Hindsight sends. The adapter is ~150 lines of Python
+standard library, mounted into a stock `python:3.12-slim` container: nothing to
+build, no model weights, stateless. Health at `GET /health`, one log line per
+rerank with document count, top score, latency and DeepInfra cost.
+
+To move reranking back to OpenRouter, set
+`HINDSIGHT_API_RERANKER_PROVIDER=openrouter` plus the
+`HINDSIGHT_API_RERANKER_OPENROUTER_*` variables instead; to do it on a local GPU,
+use TEI with `BAAI/bge-reranker-v2-m3` (native `/rerank`) and
+`HINDSIGHT_API_RERANKER_PROVIDER=tei`.
 
 Adapters live in `bge-m3/` (vendored from
 `truongvinh57/bge-m3-deploy`, adapted from 2×GPU to 1×GPU and to expose the
@@ -301,7 +316,7 @@ OpenAI-compatible embedding route). See `bge-m3/README.md`.
 | Everything 500 on first request | schema migration for that tenant still running (first request per user pays it) — retry after a few seconds, or pre-provision |
 | Recall returns nothing for a user | that user's schema has no data yet; recall is per schema, per bank |
 | Webhook deliveries missing | the sink is private: keep `HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS` covering it, and check `HINDSIGHT_API_WEBHOOK_EVENT_TYPES` |
-| Reranker 4xx | OpenRouter rerank is billed per search unit; verify the key has credit |
+| Reranker 5xx | check `docker compose logs rerank-adapter`: it reproduces the DeepInfra error body, and 402/401 there means the DeepInfra key or balance |
 
 ---
 
@@ -313,7 +328,8 @@ hindsight-deploy/
 ├── .env                      # secrets (gitignored)
 ├── .env.example              # template
 ├── extensions/               # vendored static-keys tenant extension (MIT)
-├── bge-m3/                   # local vLLM embedding/reranker stack (optional)
+├── adapters/deepinfra-rerank/ # Cohere /rerank -> DeepInfra translation (stdlib)
+├── bge-m3/                   # local vLLM BGE-M3 embedding stack (optional)
 ├── scripts/                  # smoke tests, key minting
 └── docs/decisions.md         # why each choice was made, with evidence
 ```

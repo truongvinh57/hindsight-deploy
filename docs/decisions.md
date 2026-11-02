@@ -74,16 +74,32 @@ and local does not change the embedding space — no re-embedding required.
 
 ## 5. Reranker: Cohere rerank-v3.5 on OpenRouter (DeepInfra has no rerank API)
 
-`GET https://api.deepinfra.com/v1/models` lists `BAAI/bge-m3`,
-`Qwen/Qwen3-Embedding-*`, but **no reranker**: `POST /v1/rerank` answers 404 and
-the generic `/v1/inference/Qwen/Qwen3-Reranker-0.6B` rejects the request
-("input is not json"). There is no DeepInfra rerank route Hindsight could speak.
+DeepInfra **does** host `Qwen/Qwen3-Reranker-0.6B`, but not behind a
+Cohere/TEI-compatible rerank route: `POST /v1/rerank` is 404, and the model lives
+on the generic inference API instead. The exact contract (confirmed with live
+calls) is:
 
-OpenRouter does serve rerank models. `POST https://openrouter.ai/api/v1/rerank`
-with `cohere/rerank-v3.5` returned HTTP 200 with
-`results[].relevance_score` — the Cohere wire format Hindsight's `openrouter`
-reranker provider expects (its default base URL and default model are exactly
-those values).
+```
+POST https://api.deepinfra.com/v1/inference/Qwen/Qwen3-Reranker-0.6B
+Authorization: Bearer <deepinfra key>
+Content-Type: application/json
+{"queries": ["xin chao"], "documents": ["hello world", "goodbye", "xin chao ban"]}
+
+<- {"scores": [0.0017, 0.0714, 0.9974], "inference_status": {...}}
+```
+
+Note it must be a JSON body with real arrays: the same fields sent as
+multipart form data are parsed as single strings and yield one meaningless score.
+
+Hindsight's `cohere` provider speaks `{"model","query","documents"}` ->
+`{"results":[{"index","relevance_score"}]}`, so the two are bridged by
+`adapters/deepinfra-rerank/adapter.py` (stdlib only, mounted into
+`python:3.12-slim`, nothing built). Verified end to end:
+`rerank | cohere | Qwen/Qwen3-Reranker-0.6B | success` in `llm_requests`, and
+the adapter logged `docs=2 top=0.9997 took_ms=1045 cost=$0.0000024`.
+
+The earlier OpenRouter `cohere/rerank-v3.5` route also works (HTTP 200,
+`results[].relevance_score`) and remains the fallback if the adapter is dropped.
 
 A local Qwen3-Reranker remains available as a profile (`local-rerank`), served
 by vLLM and wired through Hindsight's Cohere-compatible provider; see
@@ -124,7 +140,7 @@ network, so that variable lists `webhook-sink` and the compose CIDR
 inspected at http://localhost:8087. Replace the sink with a real receiver by
 changing `HINDSIGHT_API_WEBHOOK_URL` and narrowing the allowlist.
 
-## 9. Local embeddings verified; local reranker rejected on evidence
+## 9. Local embeddings verified; reranker stays remote (DeepInfra)
 
 `bge-m3` (profile `local-embed`) was brought up on the RTX 5070 Ti:
 
@@ -147,6 +163,18 @@ Reranker, tested and rejected for the local stack:
 - `--runner pooling --convert classify`: loads, but the HTTP surface is
   `/classify` + `/pooling` only — `/v1/rerank`, `/rerank` and `/v1/score`
   all return 404, so Hindsight has nothing to call.
-- Conclusion: keep OpenRouter `cohere/rerank-v3.5` (verified 200) or add a TEI
-  container with a native `/rerank`. The vLLM reranker service was removed from
-  the compose file rather than shipped broken.
+- Conclusion: do not host the reranker. Serve it from DeepInfra through the
+  adapter above, or use TEI (`BAAI/bge-reranker-v2-m3`) if it must run on the
+  GPU. The vLLM reranker service was removed from the compose file rather than
+  shipped broken.
+
+## 10. Recall ranks with Qwen3, Jev keeps the rest
+
+With a decision model configured, recall ranks candidates with Jev and never
+calls a reranker — so enabling both would have left the requested
+Qwen3-Reranker unused. `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`
+keeps the cross-encoder on the recall path (verified: `rerank | cohere |
+Qwen/Qwen3-Reranker-0.6B | success`) while Jev still drives consolidation
+triage and knowledge-page impact (`decision_consolidation_triage | typesafe |
+typesafe/jev-1.14 | success`). Flip that variable to `typesafe` to rank recall
+with Jev instead.
