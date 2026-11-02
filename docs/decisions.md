@@ -229,3 +229,62 @@ retain/recall. If that ever matters more than the 32 GB, the local recipe is in
 `truongvinh57/bge-m3-deploy` and in this repo's history — but re-enabling it is a
 re-ingest, not a config toggle, so it was removed from the compose file rather
 than left as a trap.
+
+## 12. Findings from the three-way audit (applied, and deliberately not)
+
+Three read-only audits ran in parallel against the live stack: compose
+correctness + resource caps, fresh-machine portability, and Hindsight config /
+adapter / security. Everything below was measured, not guessed.
+
+### Applied
+
+| Finding | Fix |
+|---|---|
+| **No resource caps at all** — one consolidation run could take the Docker VM, Postgres included, down (idle floor was 863 MB) | per-service `mem_limit` + `memswap_limit` + `cpus`, summing to ~2.9 GB (api 1 GB, worker/db 768 MB, cp 192 MB, adapter 96 MB, sink 64 MB). `memswap_limit == mem_limit` so a container fails alone instead of swapping the box. Caps are overridable in `.env` |
+| DB pool 40 + 40 against Postgres `max_connections=100` | pools 12 (api) / 8 (worker), `max_connections=60`, plus `shared_buffers=256MB`, `work_mem=8MB`, `jit=off`, `effective_cache_size=1GB`, `max_parallel_workers_per_gather=1`, `shm_size: 256m` |
+| DB healthcheck `start_period: 10s` could abort a slow first `up` | `start_period: 60s`, `retries: 30`; `stop_grace_period: 30s` so a checkpoint is not SIGKILLed |
+| Ports published on `0.0.0.0` | `127.0.0.1` by default (`BIND_ADDR` to opt out). The API has no TLS of its own |
+| Worker printed the Postgres password in cleartext (upstream `print()` of `DATABASE_URL`) | `scripts/worker-entrypoint.py` as PID 1: masks credentials on stdout/stderr **and** forwards SIGTERM so the 75 s graceful hand-back still works. A `| sed` pipeline would have broken shutdown |
+| Webhook allowlist was `webhook-sink,172.16.0.0/12` | hostname only. The guard validates **tenant-supplied** URLs, so the CIDR let any key reach the compose network and read the reply from the delivery history |
+| Reranker client timeout (60 s) outlived its purpose inside a 10 s retry budget | client 40 s, adapter 25 s, so the adapter fails first |
+| Adapter had no bounds | body cap (413), 16-slot semaphore, rejects >512 documents instead of silently truncating (Hindsight pre-fills missing scores with 0.0), model-id regex against path traversal, drains unread bodies, 400 on bad JSON, one retry on 429/5xx. Runs non-root, read-only rootfs, `no-new-privileges` |
+| `retain.completed` was not subscribed; `memory_defense.triggered` can never fire (policy disabled by default) | `retain.completed,consolidation.completed` |
+| `mint-keys.ps1` used `RandomNumberGenerator::Fill`, absent on Windows PowerShell 5.1 — emitted zero keys | `Create()` + `GetBytes()`; works on 5.1 and 7 |
+| `smoke-test.sh` could not pass on a healthy stack (POSTed to a route 1.1.0 does not expose, shelled out to a `curl` the image lacks, expected 200 from a 307) | rewritten; both scripts now read `POSTGRES_USER/POSTGRES_DB` from `.env`, refuse template placeholders, follow the CP redirect, skip docker-only checks with a clear message |
+| `scripts/*.sh` were mode 100644 | executable in the git index |
+| `POSTGRES_USER/POSTGRES_DB` were undocumented while every command hardcoded `hindsight` | documented, and every command now uses them |
+| Control-plane tag was a literal | `HINDSIGHT_CP_IMAGE` |
+| Fixed project name made two checkouts share one database | `COMPOSE_PROJECT_NAME` |
+| No proxy support | `HTTP(S)_PROXY`/`NO_PROXY` passthrough with the compose service names exempt |
+| Worker re-ran the whole migration chain | `RUN_MIGRATIONS_ON_STARTUP=false` on the worker |
+| Trace storage: 50 000 chars x 14 days | 8 000 chars x 7 days (still the largest table on a busy bank) |
+| Log rotation implicit | `x-logging` anchor (`local`, 20 MB x 3) per service |
+| Docs drift: `bge-m3` URL in `.env.example`, "OpenRouter reranker", duplicated paragraphs, `curl` worker health | README and `.env.example` rewritten; root `LICENSE` added |
+
+### Deliberately not done
+
+- **Pinning every image by digest.** `HINDSIGHT_IMAGE`/`HINDSIGHT_CP_IMAGE` are
+  already version-pinned and overridable; the remaining tags (`pgvector:pg18`,
+  `python:3.12-slim`, `http-https-echo:35`) keep readable tags so a patch
+  upgrade is one pull. A digest lock file is a reasonable next step, not a fix.
+- **Mounting `pgdata` at the parent directory to avoid one 0-byte anonymous
+  volume.** Moving it now would relocate live PGDATA; the orphan volume is inert
+  and `docker volume prune` cannot touch the named one.
+- **Dropping `webhook-sink`.** It is how webhook delivery is verified; it is now
+  loopback-only, capped, rotated, and health-checked.
+- **A reranker failover chain** (`HINDSIGHT_API_RERANKER_1_*`). Recall already
+  degrades to RRF order deterministically; adding a second paid provider for the
+  rare failure was not worth the config surface. Revisit if rerank 5xx shows up.
+- **Knowledge-page BM25 language.** `simple` reaches `memory_units` only;
+  knowledge pages are indexed with the english config in upstream migrations and
+  SQL. Not fixable from env — documented as an upstream gap; the vector arm
+  covers pages.
+- **Lowering trace retention further.** 7 days is the compromise between
+  debugging and "prompts stored twice".
+
+### Worth measuring later
+
+All six observed rerank calls returned `top=0.9974…1.0000` — Qwen3-Reranker's
+yes-probability saturates on short facts. That is fine for ordering, but do not
+set `min_scores.rerank` thresholds from these numbers without measuring on a
+larger candidate set.

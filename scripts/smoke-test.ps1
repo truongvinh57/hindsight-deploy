@@ -33,6 +33,16 @@ $hermes  = $cfg["HERMES_API_KEY"]
 $harness = $cfg["DEEPSEEK_HARNESS_API_KEY"]
 if (-not $hermes -or -not $harness) { throw "HERMES_API_KEY / DEEPSEEK_HARNESS_API_KEY missing from .env" }
 
+# The :? guards in compose only catch a MISSING variable, not one that still
+# holds a template placeholder. Refuse to verify a stack booted from the template.
+$placeholders = Select-String -Path $envFile -Pattern '=(change-me|sk-your-deepseek|sk-di-your|sk-or-v1-your|hk_change|dk_change|whsec_change)'
+if ($placeholders) {
+  throw ".env still contains template placeholders ($($placeholders.Count) line(s)) - fill it in first"
+}
+
+$pgUser = if ($cfg["POSTGRES_USER"]) { $cfg["POSTGRES_USER"] } else { "hindsight" }
+$pgDb   = if ($cfg["POSTGRES_DB"])   { $cfg["POSTGRES_DB"] }   else { "hindsight" }
+
 $H = @{ Authorization = "Bearer $hermes"; "Content-Type" = "application/json" }
 $D = @{ Authorization = "Bearer $harness"; "Content-Type" = "application/json" }
 $compose = Join-Path $ComposeDir "docker-compose.yml"
@@ -88,7 +98,7 @@ Check "hermes-agent recalls its own memory" {
 }
 
 Check "tenant schemas exist in Postgres" {
-  $out = docker compose -f $compose exec -T db psql -U hindsight -d hindsight -tAc "select nspname from pg_namespace where nspname like 'user_%' order by 1" 2>&1 | Out-String
+  $out = docker compose -f $compose exec -T db psql -U $pgUser -d $pgDb -tAc "select nspname from pg_namespace where nspname like 'user_%' order by 1" 2>&1 | Out-String
   if ($out -notmatch "user_hermes_agent") { throw "user_hermes_agent schema missing" }
   if ($out -notmatch "user_deepseek_harness") { throw "user_deepseek_harness schema missing" }
 }

@@ -1,6 +1,7 @@
-# Secrets — never commit
+# Secrets - never commit
 .env
-*.env.local
+.env.*
+!.env.example
 secrets.generated.json
 
 # Local data / logs

@@ -1,8 +1,8 @@
 # Hindsight — self-hosted, multi-user, full-feature stack
 #
-# Images are upstream release artifacts (pinned). Nothing is built here: the
-# multi-user tenant extension is mounted into the running server instead of
-# baked into a derived image.
+# Images are upstream release artifacts (pinned tags). Nothing is built here:
+# the multi-user tenant extension is mounted into the running server and the
+# reranker adapter is a stdlib script mounted into a stock python image.
 #
 #   db             postgres + pgvector
 #   api            hindsight API  :8888  (no internal worker)
@@ -11,41 +11,66 @@
 #   webhook-sink   receives Hindsight webhook deliveries (JSON echo, for inspection)
 #   rerank-adapter Cohere /rerank -> DeepInfra inference API (Qwen3-Reranker)
 #
+# Everything is remote: no GPU, no local model, no build step.
+#
 # Secrets live in .env (gitignored). Everything else is versioned right here.
+#
+# Sizing: the defaults below target a 4 vCPU / 8 GB host (containers capped at
+# ~2.9 GB total). A 4 GB host works only with the "tiny" overrides documented in
+# .env.example, and Docker's VM must be given the RAM (Docker Desktop defaults
+# to ~50% of the host). Raise the caps per machine in .env when you have more.
 
-name: hindsight
+name: ${COMPOSE_PROJECT_NAME:-hindsight}
+
+# ── Anchors ────────────────────────────────────────────────────────────────
+# Every container is CAPPED. Without these, one consolidation run can take the
+# whole Docker VM (and Postgres with it) down. memswap_limit == mem_limit so a
+# container fails on its own instead of swapping the box into the ground.
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "3"
+
+x-proxy: &proxy
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db,api,worker,control-plane,webhook-sink,rerank-adapter}
+  no_proxy: ${NO_PROXY:-localhost,127.0.0.1,db,api,worker,control-plane,webhook-sink,rerank-adapter}
 
 # ── Shared configuration for API and worker ────────────────────────────────
 x-hindsight-env: &hindsight-env
+  <<: *proxy
   PYTHONPATH: /app/extensions
   # Database
-  HINDSIGHT_API_DATABASE_URL: postgresql://${POSTGRES_USER:-hindsight}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-hindsight}
+  HINDSIGHT_API_DATABASE_URL: postgresql://${POSTGRES_USER:-hindsight}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - cp .env.example .env and fill it}@db:5432/${POSTGRES_DB:-hindsight}
   HINDSIGHT_API_DATABASE_SCHEMA: public
   HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP: "true"
-  HINDSIGHT_API_DB_POOL_MIN_SIZE: "5"
-  HINDSIGHT_API_DB_POOL_MAX_SIZE: "40"
+  # api and worker each open their own pool; keep (2 x max) well under the
+  # server's max_connections (set to 60 in the db service below).
+  HINDSIGHT_API_DB_POOL_MIN_SIZE: "${DB_POOL_MIN_SIZE:-2}"
+  HINDSIGHT_API_DB_POOL_MAX_SIZE: "${DB_POOL_MAX_SIZE:-12}"
 
   # ── LLM: DeepSeek primary, DeepInfra failover (multi-LLM strategy) ──────
   HINDSIGHT_API_LLM_PROVIDER: deepseek
-  HINDSIGHT_API_LLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
-  HINDSIGHT_API_LLM_MODEL: deepseek-flash
+  HINDSIGHT_API_LLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required - cp .env.example .env and fill it}
+  HINDSIGHT_API_LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
   HINDSIGHT_API_LLM_BASE_URL: https://api.deepseek.com
-  HINDSIGHT_API_LLM_TIMEOUT: "300"
-  HINDSIGHT_API_LLM_MAX_CONCURRENT: "8"
+  HINDSIGHT_API_LLM_TIMEOUT: "${LLM_TIMEOUT:-180}"
+  HINDSIGHT_API_LLM_MAX_CONCURRENT: "${LLM_MAX_CONCURRENT:-5}"
   HINDSIGHT_API_LLM_STRATEGY: '{"mode": "failover"}'
   HINDSIGHT_API_LLM_1_PROVIDER: openai
-  HINDSIGHT_API_LLM_1_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
+  HINDSIGHT_API_LLM_1_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required - cp .env.example .env and fill it}
   HINDSIGHT_API_LLM_1_BASE_URL: https://api.deepinfra.com/v1/openai
-  HINDSIGHT_API_LLM_1_MODEL: deepseek-ai/DeepSeek-V4.1-Flash-1017
+  HINDSIGHT_API_LLM_1_MODEL: ${LLM_FALLBACK_MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}
   # Vision slot: deepseek-flash is multimodal (text+image), so retain chunks
   # carrying screenshots go to it instead of being refused.
   HINDSIGHT_API_VLM_PROVIDER: deepseek
   HINDSIGHT_API_VLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
-  HINDSIGHT_API_VLM_MODEL: deepseek-flash
+  HINDSIGHT_API_VLM_MODEL: ${LLM_MODEL:-deepseek-flash}
 
   # ── Embeddings: Qwen3-Embedding-0.6B on DeepInfra, 1024-dim ────────────
-  # No model is hosted locally: this removes the ~32 GB vLLM image and the GPU
-  # from the memory path. 1024 dims matches the schema, so no migration.
+  # No model is hosted locally: no GPU, no ~32 GB image.
   #
   # CHANGING THE MODEL, THE DIMENSION OR THE PREFIX INVALIDATES EVERY STORED
   # VECTOR (same width = Hindsight cannot detect it) and requires re-ingesting.
@@ -55,31 +80,29 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${EMBEDDINGS_MODEL:-Qwen/Qwen3-Embedding-0.6B}
   HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE: "32"
   HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS: "8192"
-  HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS: "8"
-  # Qwen3-Embedding expects an instruction on the query side only; passages go
-  # in raw (passage prefix stays empty). ${EMBEDDINGS_QUERY_PREFIX} can blank it.
-  # Qwen3-Embedding wants an instruction on the query side; passages stay raw.
-  # Literal (not interpolated) because the value contains a newline. Changing it
-  # invalidates stored vectors.
+  HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS: "${EMBEDDINGS_MAX_CONCURRENT:-4}"
+  # Qwen3-Embedding wants an instruction on the query side only; passages stay
+  # raw (passage prefix empty). Literal, not interpolated, because the value
+  # contains a newline. Changing it invalidates stored vectors.
   HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX: "Instruct: Given a user question, retrieve passages that answer it\nQuery: "
 
   # ── Reranker: Qwen3-Reranker-0.6B on DeepInfra ──────────────────────────
-  # DeepInfra serves the model on its inference API (multipart/JSON with
-  # queries+documents -> flat scores), which is not the Cohere wire format
-  # Hindsight speaks. `rerank-adapter` translates; this is the Cohere-format
-  # client pointed at it.
+  # DeepInfra's inference API is not the Cohere wire format Hindsight speaks, so
+  # rerank-adapter translates. This client timeout must stay SHORTER than
+  # Hindsight's own rerank budget, otherwise a slow rerank wastes the retry
+  # budget before it can fail over to RRF order.
   HINDSIGHT_API_RERANKER_PROVIDER: cohere
   HINDSIGHT_API_RERANKER_COHERE_BASE_URL: http://rerank-adapter:8080/v1/rerank
   HINDSIGHT_API_RERANKER_COHERE_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
   HINDSIGHT_API_RERANKER_COHERE_MODEL: ${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
-  HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "300"
+  HINDSIGHT_API_RERANKER_COHERE_TIMEOUT: "40"
 
   # ── Decision model: Jev 1.14 (TypeSafe System One via OpenRouter) ───────
   HINDSIGHT_API_DECISION_MODEL_PROVIDER: typesafe
   HINDSIGHT_API_DECISION_MODEL_BASE_URL: https://openrouter.ai/api
-  HINDSIGHT_API_DECISION_MODEL_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
+  HINDSIGHT_API_DECISION_MODEL_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required - cp .env.example .env and fill it}
   HINDSIGHT_API_DECISION_MODEL_MODEL: typesafe/jev-1.14
-  HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT: "24"
+  HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT: "${DECISION_MODEL_MAX_CONCURRENT:-8}"
   # With a decision model, recall would rank with Jev instead of the reranker.
   # Keep Qwen3-Reranker on the recall path and let Jev do what only it does
   # (consolidation triage, knowledge-page impact). Flip to `typesafe` to rank
@@ -89,7 +112,7 @@ x-hindsight-env: &hindsight-env
   # ── Multi-user: static keys, one Postgres schema per user ──────────────
   HINDSIGHT_API_TENANT_EXTENSION: hindsight_ext_static_keys_tenant:StaticKeysTenantExtension
   HINDSIGHT_API_TENANT_SCHEMA_PREFIX: user
-  HINDSIGHT_API_TENANT_USERS: "hermes-agent:${HERMES_API_KEY:?HERMES_API_KEY is required},deepseek-harness:${DEEPSEEK_HARNESS_API_KEY:?DEEPSEEK_HARNESS_API_KEY is required}"
+  HINDSIGHT_API_TENANT_USERS: "hermes-agent:${HERMES_API_KEY:?HERMES_API_KEY is required - cp .env.example .env and fill it},deepseek-harness:${DEEPSEEK_HARNESS_API_KEY:?DEEPSEEK_HARNESS_API_KEY is required - cp .env.example .env and fill it}"
 
   # ── Full-feature switches ───────────────────────────────────────────────
   HINDSIGHT_API_ENABLE_OBSERVATIONS: "true"
@@ -97,53 +120,94 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_MCP_ENABLED: "true"
   HINDSIGHT_API_ENABLE_BANK_CONFIG_API: "true"
   HINDSIGHT_API_AUDIT_LOG_ENABLED: "true"
-  HINDSIGHT_API_AUDIT_LOG_RETENTION_DAYS: "90"
+  HINDSIGHT_API_AUDIT_LOG_RETENTION_DAYS: "${AUDIT_LOG_RETENTION_DAYS:-90}"
   HINDSIGHT_API_LLM_TRACE_ENABLED: "true"
-  HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS: "14"
+  HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS: "${LLM_TRACE_RETENTION_DAYS:-7}"
+  # Full prompts/responses at 50k chars x 7 days is the largest table on a busy
+  # bank, and it duplicates whatever the agent retained.
+  HINDSIGHT_API_LLM_TRACE_MAX_CHARS: "${LLM_TRACE_MAX_CHARS:-8000}"
   HINDSIGHT_API_FILE_STORAGE_TYPE: native
-  HINDSIGHT_API_DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+  HINDSIGHT_API_DEFAULT_TIMEZONE: ${HINDSIGHT_DEFAULT_TIMEZONE:-Asia/Ho_Chi_Minh}
   HINDSIGHT_API_TEXT_SEARCH_EXTENSION: native
+  # "simple" avoids English stemming on Vietnamese memory text. Knowledge pages
+  # are still indexed with the english config upstream (see docs/decisions.md).
   HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE: simple
-  HINDSIGHT_API_OPERATION_RETENTION_DAYS: "30"
+  HINDSIGHT_API_OPERATION_RETENTION_DAYS: "${OPERATION_RETENTION_DAYS:-30}"
   HINDSIGHT_API_METRICS_BACKLOG_ENABLED: "true"
 
   # ── Webhooks ────────────────────────────────────────────────────────────
   HINDSIGHT_API_WEBHOOK_URL: http://webhook-sink:8080/hindsight
-  HINDSIGHT_API_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
-  HINDSIGHT_API_WEBHOOK_EVENT_TYPES: consolidation.completed,memory_defense.triggered
-  # SSRF guard: allow the compose network (the sink is private by design).
-  HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS: webhook-sink,172.16.0.0/12
+  HINDSIGHT_API_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET is required - cp .env.example .env and fill it}
+  HINDSIGHT_API_WEBHOOK_EVENT_TYPES: retain.completed,consolidation.completed
+  # SSRF guard for TENANT-SUPPLIED webhook URLs: permit the sink by name only.
+  # Never widen this to a CIDR - it would let any key reach the compose network.
+  HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS: webhook-sink
 
   # ── Logging / worker tuning ─────────────────────────────────────────────
-  HINDSIGHT_API_LOG_LEVEL: info
+  HINDSIGHT_API_LOG_LEVEL: ${LOG_LEVEL:-info}
   HINDSIGHT_API_LOG_FORMAT: json
   HINDSIGHT_API_WORKER_POLL_INTERVAL_MS: "500"
-  HINDSIGHT_API_WORKER_MAX_SLOTS: "10"
+  HINDSIGHT_API_WORKER_MAX_SLOTS: "${WORKER_MAX_SLOTS:-5}"
   HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS: "2"
 
 services:
   db:
-    image: pgvector/pgvector:pg18
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
     restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${DB_MEM_LIMIT:-768m}
+    memswap_limit: ${DB_MEM_LIMIT:-768m}
+    cpus: ${DB_CPUS:-1.0}
+    shm_size: 256m
+    logging: *logging
+    # Tuned for a small box: the image defaults (128 MB shared_buffers,
+    # effective_cache_size=4GB, jit=on) are wrong in both directions here.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=60
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - max_parallel_workers_per_gather=1
+      - -c
+      - jit=off
+      - -c
+      - wal_compression=on
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hindsight}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - cp .env.example .env and fill it}
       POSTGRES_DB: ${POSTGRES_DB:-hindsight}
     volumes:
+      # PGDATA for the pg18 images. (Mounting the parent would avoid one 0-byte
+      # anonymous volume; moving it now would mean relocating live data.)
       - pgdata:/var/lib/postgresql/18/docker
     healthcheck:
+      # First boot runs initdb; 10s was enough to abort a slow cold start.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hindsight} -d ${POSTGRES_DB:-hindsight}"]
       interval: 5s
       timeout: 5s
-      retries: 20
-      start_period: 10s
-    # Uncomment to inspect the database from the host:
-    # ports: ["5433:5432"]
+      retries: 30
+      start_period: 60s
+    # Uncomment to inspect the database from the host (loopback only):
+    # ports: ["127.0.0.1:5433:5432"]
 
   api:
     image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
     restart: unless-stopped
     stop_grace_period: 75s
+    mem_limit: ${API_MEM_LIMIT:-1g}
+    memswap_limit: ${API_MEM_LIMIT:-1g}
+    cpus: ${API_CPUS:-1.5}
+    logging: *logging
     environment:
       <<: *hindsight-env
       HINDSIGHT_ENABLE_API: "true"
@@ -153,15 +217,18 @@ services:
     volumes:
       - ./extensions:/app/extensions:ro
     ports:
-      - "${HINDSIGHT_API_PORT:-8888}:8888"
+      # Loopback by default: the API speaks plain HTTP with bearer keys.
+      # For agents on other hosts put TLS in front, or set BIND_ADDR=0.0.0.0.
+      - "${BIND_ADDR:-127.0.0.1}:${HINDSIGHT_API_PORT:-8888}:8888"
     depends_on:
       db:
         condition: service_healthy
       rerank-adapter:
         condition: service_healthy
     healthcheck:
-      # The runtime image ships no curl; probe over the venv's python instead.
-      test: ["CMD", "/app/api/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8888/health', timeout=8).status==200 else 1)"]
+      # The runtime image ships no curl; probe over the venv's python, falling
+      # back to PATH python for a rebuilt image with a different venv layout.
+      test: ["CMD-SHELL", "P=/app/api/.venv/bin/python; [ -x $$P ] || P=python; exec $$P -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8888/health', timeout=8).status==200 else 1)\""]
       interval: 15s
       timeout: 12s
       retries: 20
@@ -171,59 +238,108 @@ services:
     image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
     restart: unless-stopped
     stop_grace_period: 75s
-    command: ["hindsight-worker"]
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
+    memswap_limit: ${WORKER_MEM_LIMIT:-768m}
+    cpus: ${WORKER_CPUS:-1.0}
+    logging: *logging
+    # Wrapper forwards SIGTERM (so tasks are handed back on shutdown) and masks
+    # the database URL that the upstream worker prints in cleartext at startup.
+    command: ["/app/api/.venv/bin/python", "-u", "/app/worker-entrypoint.py", "hindsight-worker"]
     environment:
       <<: *hindsight-env
       HINDSIGHT_API_WORKER_ID: hindsight-worker-1
       HINDSIGHT_API_WORKER_HTTP_PORT: "8889"
+      # The api migrates every tenant schema at boot; the worker must not repeat
+      # the whole Alembic chain (and must never race it).
+      HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP: "false"
+      HINDSIGHT_API_DB_POOL_MAX_SIZE: "${WORKER_DB_POOL_MAX_SIZE:-8}"
     volumes:
       - ./extensions:/app/extensions:ro
+      - ./scripts/worker-entrypoint.py:/app/worker-entrypoint.py:ro
     depends_on:
       api:
         condition: service_healthy
       rerank-adapter:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/app/api/.venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8889/health', timeout=8).status==200 else 1)"]
+      test: ["CMD-SHELL", "P=/app/api/.venv/bin/python; [ -x $$P ] || P=python; exec $$P -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8889/health', timeout=8).status==200 else 1)\""]
       interval: 30s
       timeout: 12s
       retries: 10
       start_period: 120s
 
   control-plane:
-    image: ghcr.io/vectorize-io/hindsight-control-plane:1.1.0
+    image: ${HINDSIGHT_CP_IMAGE:-ghcr.io/vectorize-io/hindsight-control-plane:1.1.0}
     restart: unless-stopped
+    mem_limit: ${CP_MEM_LIMIT:-192m}
+    memswap_limit: ${CP_MEM_LIMIT:-192m}
+    cpus: ${CP_CPUS:-0.5}
+    logging: *logging
     environment:
+      <<: *proxy
       HINDSIGHT_CP_DATAPLANE_API_URL: http://api:8888
+      # This key IS the hermes-agent tenant credential: treat the CP password
+      # accordingly. Rotating HERMES_API_KEY requires restarting this service.
       HINDSIGHT_CP_DATAPLANE_API_KEY: ${HERMES_API_KEY:?HERMES_API_KEY is required}
-      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?HINDSIGHT_CP_ACCESS_KEY is required}
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?HINDSIGHT_CP_ACCESS_KEY is required - cp .env.example .env and fill it}
     ports:
-      - "${HINDSIGHT_CP_PORT:-9999}:9999"
+      - "${BIND_ADDR:-127.0.0.1}:${HINDSIGHT_CP_PORT:-9999}:9999"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      # The node image ships no curl and no shell tooling; use node's fetch.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9999/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   webhook-sink:
-    image: mendhak/http-https-echo:35
+    image: ${WEBHOOK_SINK_IMAGE:-mendhak/http-https-echo:35}
     restart: unless-stopped
+    mem_limit: ${SINK_MEM_LIMIT:-64m}
+    memswap_limit: ${SINK_MEM_LIMIT:-64m}
+    cpus: ${SINK_CPUS:-0.1}
+    logging: *logging
     environment:
       HTTP_PORT: "8080"
       LOG_WITHOUT_NEWLINE: "true"
     ports:
-      - "${WEBHOOK_SINK_PORT:-8087}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${WEBHOOK_SINK_PORT:-8087}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ── Cohere /rerank -> DeepInfra translation (no build, stdlib only) ─────
   rerank-adapter:
-    image: python:3.12-slim
+    image: ${ADAPTER_IMAGE:-python:3.12-slim}
     restart: unless-stopped
+    mem_limit: ${ADAPTER_MEM_LIMIT:-96m}
+    memswap_limit: ${ADAPTER_MEM_LIMIT:-96m}
+    cpus: ${ADAPTER_CPUS:-0.25}
+    logging: *logging
+    # Non-root, read-only rootfs, no new privileges: the adapter writes nothing.
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
     command: ["python", "-u", "/app/adapter.py"]
     environment:
+      <<: *proxy
       DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
       DEEPINFRA_MODEL: ${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
       PORT: "8080"
-      TIMEOUT: "120"
+      # Must fail before Hindsight's own 40s rerank timeout.
+      TIMEOUT: "${RERANK_ADAPTER_TIMEOUT:-25}"
+      MAX_CONCURRENCY: "${RERANK_ADAPTER_CONCURRENCY:-16}"
+      MAX_BODY_BYTES: "8388608"
+      PYTHONDONTWRITEBYTECODE: "1"
     volumes:
-      - ./adapters/deepinfra-rerank/adapter.py:/app/adapter.py:ro
+      - ./adapters/deepinfra-rerank:/app:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=5).status==200 else 1)"]
       interval: 20s

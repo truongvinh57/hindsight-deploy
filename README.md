@@ -1,22 +1,18 @@
 # hindsight-deploy
 
-Self-hosted **Hindsight** (agent memory) on Docker: full feature set, multiple
-isolated users, cloud + local model backends. One `docker compose up -d` per
-machine, configuration in git, secrets in a gitignored `.env`.
+Self-hosted **Hindsight** (agent memory) on Docker: full feature set, several
+isolated users, every model remote. Clone it on any machine with Docker, fill in
+`.env`, run one smoke test.
 
-- Hindsight version: **1.1.0** (upstream images, nothing is built here)
-- Users: **hermes-agent** (primary) and **deepseek-harness**, each with its own
-  bearer key and its own PostgreSQL schema (`user_hermes_agent`,
-  `user_deepseek_harness`) — memory isolation at the database level.
-- LLM: **DeepSeek `deepseek-flash`** primary, **DeepInfra
-  `deepseek-ai/DeepSeek-V4.1-Flash-1017`** automatic failover.
-- Embeddings: **`Qwen/Qwen3-Embedding-0.6B`** on DeepInfra (1024-dim, query-side
-  instruction). No GPU is involved in the memory path.
-- Reranker: **`Qwen/Qwen3-Reranker-0.6B`** on DeepInfra, through a small
-  stdlib `rerank-adapter` that translates Cohere `/rerank` to DeepInfra's
-  inference API (no model hosted, no image built).
-- Decision model: **Jev 1.14** (`typesafe/jev-1.14`) through OpenRouter's
-  System One API.
+- Hindsight **1.1.0**, upstream images, **nothing is built here**
+- Users: **hermes-agent** (primary) and **deepseek-harness**, one bearer key and
+  one PostgreSQL schema each (`user_hermes_agent`, `user_deepseek_harness`)
+- LLM: DeepSeek `deepseek-flash` (also the vision slot), failover to DeepInfra
+  `deepseek-ai/DeepSeek-V4.1-Flash-1017`
+- Embeddings: `Qwen/Qwen3-Embedding-0.6B` on DeepInfra (1024-dim)
+- Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, through `rerank-adapter`
+- Decision model: `typesafe/jev-1.14` through OpenRouter's System One API
+- **No GPU, no local model, no build step.**
 
 ---
 
@@ -41,50 +37,66 @@ machine, configuration in git, secrets in a gitignored `.env`.
      │ worker      │───────────────────────────┘
      │ consolidation, mental models
      └──────┬──────┘
-            │ webhook
+            │ webhook (signed)
      ┌──────▼────────┐
-     │ webhook-sink  │  JSON echo, inspect deliveries at :8087
+     │ webhook-sink  │  JSON echo, inspect at :8087
      └───────────────┘
 ```
 
-External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover + embeddings),
-DeepInfra (reranker via `rerank-adapter`), OpenRouter (Jev decision model).
+External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover, embeddings,
+reranker via `rerank-adapter`), OpenRouter (Jev decision model).
 
-**Why nothing is built locally:** the multi-user tenant extension
-(`hindsight-extensions/static-keys-tenant`) is not published to PyPI, but the
-server imports extensions from `PYTHONPATH`. We vendor the package under
-`extensions/` and mount it at `/app/extensions` — same effect as the upstream
-Dockerfile, without maintaining a derived image.
+**Why nothing is built:** the multi-user tenant extension is not published to
+PyPI, but the server imports extensions from `PYTHONPATH`. The package is
+vendored under `extensions/` and mounted at `/app/extensions` — same effect as
+upstream's derived Dockerfile, without maintaining a derived image. The reranker
+adapter is a stdlib script mounted into a stock `python:3.12-slim`.
 
 ---
 
-## 2. Prerequisites
+## 2. Prerequisites and sizing
 
-- Docker Engine / Docker Desktop with Compose v2 (tested: Docker 29.9, Compose 5.6)
-- ~2 GB RAM for the stack (slim image, external model providers)
-- Optional: NVIDIA GPU + Container Toolkit for the local backends
-  (tested: RTX 5070 Ti 16 GB, driver 616.92)
+| | |
+|---|---|
+| Docker Engine / Desktop + Compose v2 | tested on Docker 29.9 / Compose 5.6 |
+| **Recommended host** | 4 vCPU, **8 GB RAM**, 10 GB disk |
+| **Minimum** | 2 vCPU, **4 GB RAM** with the "tiny" overrides in `.env.example`, single user, light traffic |
+| Disk | 3.4 GB images + ~0.1 GB database at rest; traces/audit grow with use |
+| GPU | **not used** |
+
+Every container is capped, so the stack cannot eat the host:
+
+| service | memory cap | cpus |
+|---|---|---|
+| api | 1 GB | 1.5 |
+| worker | 768 MB | 1.0 |
+| db | 768 MB | 1.0 |
+| control-plane | 192 MB | 0.5 |
+| rerank-adapter | 96 MB | 0.25 |
+| webhook-sink | 64 MB | 0.1 |
+| **total** | **~2.9 GB** | **4.35** |
+
+Idle usage is far lower (~0.9 GB total measured). Raise the caps per machine in
+`.env` (`API_MEM_LIMIT`, `WORKER_MEM_LIMIT`, …).
+
+> **Windows/Docker Desktop:** the VM gets roughly half of host RAM by default, so
+> an 8 GB host gives the containers ~4 GB. Set `memory=4GB` (or more) in
+> `%UserProfile%\.wslconfig` and restart Docker before going below an 8 GB host.
 
 ---
 
 ## 3. Quickstart
 
 ```bash
-cp .env.example .env      # then fill in keys
-docker compose up -d db
-docker compose up -d api  # first start runs migrations, then waits for /health
-docker compose up -d worker control-plane webhook-sink
-```
-
-Or simply:
-
-```bash
+git clone <this repo> && cd hindsight-deploy
+cp .env.example .env          # then fill in the six required secrets
 docker compose up -d
-docker compose ps
+./scripts/smoke-test.sh       # Windows: .\scripts\smoke-test.ps1
 ```
 
-> No GPU and no local model is required: embeddings come from DeepInfra. The
-> whole stack starts with a plain `docker compose up -d` on any machine.
+If a required variable is missing, compose names it in the error. If it is still
+a template placeholder, the smoke test refuses to run rather than certify a
+stack that will 401 on its first model call.
 
 | Endpoint | URL |
 |---|---|
@@ -94,19 +106,25 @@ docker compose ps
 | Webhook sink (JSON echo) | http://localhost:8087 |
 | MCP | http://localhost:8888/mcp/{bank_id}/ |
 
+All three published ports bind **127.0.0.1** by default: the API speaks plain
+HTTP with bearer keys, so exposing it is a deliberate decision. For agents on
+other hosts put TLS in front, or set `BIND_ADDR=0.0.0.0` in `.env`.
+
 Health:
 
 ```bash
 curl -fsS http://localhost:8888/health
-docker compose exec worker curl -fsS http://localhost:8889/health
+# the runtime image has no curl; probe the worker over its own python:
+docker compose exec worker /app/api/.venv/bin/python -c \
+  "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8889/health', timeout=8).status==200 else 1)"
 ```
 
 ---
 
 ## 4. Users, keys and isolation
 
-Every request carries a user's bearer key. The tenant extension resolves it to a
-Postgres schema:
+Each request carries one user's bearer key; the tenant extension resolves it to
+a PostgreSQL schema:
 
 | User | Schema | Key variable |
 |---|---|---|
@@ -114,38 +132,40 @@ Postgres schema:
 | `deepseek-harness` | `user_deepseek_harness` | `DEEPSEEK_HARNESS_API_KEY` |
 
 ```bash
-# hermes-agent
 curl -H "Authorization: Bearer $HERMES_API_KEY" http://localhost:8888/v1/default/banks
-
-# deepseek-harness
 curl -H "Authorization: Bearer $DEEPSEEK_HARNESS_API_KEY" http://localhost:8888/v1/default/banks
 ```
 
-Unknown or missing keys return `401`. A user never sees another user's schema:
-graphs, documents, mental models and audit rows are all per-schema.
+Unknown or missing keys return `401`. A user never sees another user's schema —
+graphs, documents, mental models and audit rows are all per schema.
 
 **Add a user:** append `name:key` to `HINDSIGHT_API_TENANT_USERS` in
-`docker-compose.yml`, then `docker compose up -d api worker` (both must be
-restarted — the worker enumerates tenants to consolidate). Optionally
-pre-provision the schema:
+`docker-compose.yml`, then bring the **api up first** (it migrates tenant
+schemas at boot) and only then the worker:
 
 ```bash
-docker compose run --rm api hindsight-admin run-db-migration
+docker compose up -d api
+docker compose run --rm api hindsight-admin run-db-migration   # optional: pre-provision
+docker compose up -d worker
 ```
 
-Rules for user ids and keys: ids are case-insensitive, dashes become
-underscores; keys must be ASCII and must not contain commas.
+Restarting only the worker would leave it polling a schema that does not exist yet
+(it swallows that error and looks idle). Keys are read at process start, so both
+services must restart after a key change.
 
-**Admin UI** is bound to the `hermes-agent` key (`HINDSIGHT_CP_DATAPLANE_API_KEY`),
-so it shows that user's schema only. The Control Plane has one data-plane
-identity by design; per-user UIs would mean one CP container per user.
+User ids are case-insensitive (dashes become underscores); keys must be ASCII and
+must not contain commas.
+
+**Admin UI** is bound to the `hermes-agent` key, so it shows that schema only. The
+Control Plane has one data-plane identity by design; per-user UIs would mean one
+CP container per user.
 
 ---
 
 ## 5. Configuration
 
-Everything non-secret is in `docker-compose.yml` under the `x-hindsight-env`
-anchor (shared by API and worker). Secrets and per-machine overrides are in
+Non-secret configuration lives in `docker-compose.yml` (the `x-hindsight-env`
+anchor is shared by api and worker); secrets and per-machine overrides live in
 `.env`.
 
 ### Models
@@ -153,28 +173,40 @@ anchor (shared by API and worker). Secrets and per-machine overrides are in
 | Purpose | Config | Value |
 |---|---|---|
 | LLM primary | `HINDSIGHT_API_LLM_PROVIDER/_MODEL` | `deepseek` / `deepseek-flash` |
-| LLM failover | `HINDSIGHT_API_LLM_1_*` + `LLM_STRATEGY` | `openai` provider pointed at DeepInfra, `{"mode":"failover"}` |
+| LLM failover | `HINDSIGHT_API_LLM_1_*` + `LLM_STRATEGY` | `openai` provider at DeepInfra, `{"mode":"failover"}` |
 | Vision | `HINDSIGHT_API_VLM_*` | `deepseek` / `deepseek-flash` (text+image) |
 | Embeddings | `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` | `Qwen/Qwen3-Embedding-0.6B`, 1024 dims, query instruction |
-| Reranker | `HINDSIGHT_API_RERANKER_COHERE_*` -> `rerank-adapter` | `Qwen/Qwen3-Reranker-0.6B` (DeepInfra) |
-| Decision model | `HINDSIGHT_API_DECISION_MODEL_*` | `typesafe` provider, base `https://openrouter.ai/api`, model `typesafe/jev-1.14` |
+| Reranker | `HINDSIGHT_API_RERANKER_COHERE_*` -> adapter | `Qwen/Qwen3-Reranker-0.6B` |
+| Decision model | `HINDSIGHT_API_DECISION_MODEL_*` | provider `typesafe`, base `https://openrouter.ai/api`, model `typesafe/jev-1.14` |
 
-The decision model is the subtle one: Jev is not a chat model. Hindsight's
-`typesafe` provider posts System One bodies to `<base>/v1/systemone`, and
-OpenRouter serves exactly that at `https://openrouter.ai/api/v1/systemone` —
-so the base URL is `https://openrouter.ai/api` and the model id is
-`typesafe/jev-1.14`. No adapter is involved.
+Jev is not a chat model: Hindsight's `typesafe` provider posts System One bodies
+to `<base>/v1/systemone`, and OpenRouter serves exactly that at
+`https://openrouter.ai/api/v1/systemone`, so the base URL is
+`https://openrouter.ai/api`. No adapter is involved.
+
+With a decision model configured, recall would rank with Jev instead of the
+reranker. `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none` keeps Qwen3-Reranker
+on the recall path while Jev still drives consolidation triage and knowledge-page
+impact. Flip it to `typesafe` to rank recall with Jev instead.
 
 ### Features enabled
 
 Observations + auto-consolidation, mental models / knowledge pages, MCP server,
-audit log (90 days), LLM request tracing (14 days), native file storage,
-native BM25 with the `simple` dictionary (no English stemming — correct for
-Vietnamese), webhooks (signed, delivered to `webhook-sink`), metrics backlog.
+audit log (90 days), LLM request tracing (7 days, 8 000 chars per side), native
+file storage, native BM25 with the `simple` dictionary (no English stemming on
+Vietnamese memory text), signed webhooks for `retain.completed` and
+`consolidation.completed`, metrics backlog.
 
-Disabled on purpose: batch retain (needs a batch-capable provider), memory
-defense (opt-in per bank, configure when needed), OTEL export (no collector
-here), Oracle backend.
+Off on purpose: batch retain (needs a batch-capable provider), memory defense
+(per-bank opt-in), OTEL export (no collector), Oracle backend, local models.
+
+### Webhooks and the SSRF guard
+
+The global webhook points at `webhook-sink`. Tenant-supplied webhook URLs are
+validated against `HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS`, which lists **only** the
+sink hostname. Do not widen it to a CIDR: that would let any tenant key reach the
+whole compose network (API, admin UI, database) and read the response back through
+the delivery history.
 
 ---
 
@@ -183,40 +215,43 @@ here), Oracle backend.
 ```bash
 docker compose ps
 docker compose logs -f api worker
-docker compose restart api worker
+docker compose restart api worker control-plane
 ```
 
 ### Backup / restore
 
 ```bash
-# backup (all schemas incl. every tenant)
-docker compose exec -T db pg_dump -U hindsight -d hindsight -Fc > backup-$(date +%F).dump
+# ${POSTGRES_USER}/${POSTGRES_DB} come from .env; adjust if you changed them.
+docker compose exec -T db pg_dump -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-hindsight}" -Fc > backup-$(date +%F).dump
 
-# restore into a fresh stack
 docker compose down -v
 docker compose up -d db
-docker compose exec -T db pg_restore -U hindsight -d hindsight --clean --if-exists < backup-2026-11-02.dump
+docker compose exec -T db pg_restore -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-hindsight}" --clean --if-exists < backup-2026-11-02.dump
 docker compose up -d
 ```
 
 ### Upgrade
 
-1. Change `HINDSIGHT_IMAGE` / the control-plane tag in `docker-compose.yml`.
+1. Change `HINDSIGHT_IMAGE` / `HINDSIGHT_CP_IMAGE` in `.env`.
 2. `docker compose pull`
 3. `docker compose up -d` — migrations run automatically on API start.
+4. Re-sync `extensions/` from the same upstream release tag (the extension is
+   vendored, not fetched): the server loads it by path.
+5. `./scripts/smoke-test.sh`
 
-Pin tags; `:latest` is not used anywhere.
+Pin tags; `:latest` is used nowhere.
 
 ### Rotate a user key
 
-Change the key in `.env`, restart `api` and `worker`. Old key stops working
-immediately; data stays in the same schema.
+Change the key in `.env`, then restart **api, worker and control-plane** — the CP
+sends `HERMES_API_KEY` as its data-plane token and reads it at process start.
 
 ### Inspect a tenant's schema
 
 ```bash
-docker compose exec db psql -U hindsight -d hindsight -c '\dn'
-docker compose exec db psql -U hindsight -d hindsight -c 'set search_path=user_hermes_agent; select bank_id, count(*) from documents group by 1;'
+docker compose exec db psql -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-hindsight}" -c '\dn'
+docker compose exec db psql -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-hindsight}" \
+  -c 'set search_path=user_hermes_agent; select bank_id, count(*) from documents group by 1;'
 ```
 
 ---
@@ -224,76 +259,49 @@ docker compose exec db psql -U hindsight -d hindsight -c 'set search_path=user_h
 ## 7. Verification
 
 ```bash
-./scripts/smoke-test.sh        # or scripts/smoke-test.ps1 on Windows
+./scripts/smoke-test.sh        # Linux / macOS / WSL / Git Bash
+.\scripts\smoke-test.ps1       # Windows PowerShell 5.1+
 ```
 
-It checks: API health, 401 on a bad key, per-user schema isolation (retain as
-hermes-agent, recall as deepseek-harness → nothing), tenant schemas exist in
-Postgres, worker health, control-plane reachable, webhook sink reachable.
+Checks: API health, 401 on a bad key, per-user isolation (retain as hermes-agent,
+recall as deepseek-harness → nothing), the tenant schemas in Postgres, worker
+health, control-plane reachability (follows its 307 to `/login`), webhook sink.
+The bash script skips the database/worker checks with a clear message when the
+docker CLI is not usable in that shell (e.g. a WSL distro without Docker Desktop
+integration).
 
-### Verified on the first deployment (2026-11-02)
+### Verified on the first deployment
 
-Windows 11 + Docker Desktop, RTX 5070 Ti 16 GB, Docker 29.9 / Compose 5.6.
+Windows 11 + Docker Desktop, Docker 29.9 / Compose 5.6.
 
 | Check | Evidence |
 |---|---|
-| Stack healthy | `db`, `api`, `worker`, `control-plane`, `webhook-sink` all `Up (healthy)` |
-| Schema isolation | `\dn` lists `user_hermes_agent` + `user_deepseek_harness`; retain as one user is invisible to the other (404 on the other tenant's bank) |
-| Embeddings 1024-dim | `select vector_dims(embedding) ...` -> `1024` |
-| Model calls | `llm_requests`: `embedding_* | openai | Qwen/Qwen3-Embedding-0.6B`, `retain_extract_facts | deepseek | deepseek-flash`, `rerank | cohere | Qwen/Qwen3-Reranker-0.6B`, `decision_consolidation_triage | typesafe | typesafe/jev-1.14` - all `success` |
+| Isolation | retain as hermes-agent is invisible to deepseek-harness (404 on the other tenant's bank); `\dn` lists both schemas |
+| Model calls | `llm_requests`: `embedding_* | openai | Qwen/Qwen3-Embedding-0.6B`, `retain_extract_facts | deepseek | deepseek-flash`, `rerank | cohere | Qwen/Qwen3-Reranker-0.6B`, `decision_consolidation_triage | typesafe | typesafe/jev-1.14` — all `success` |
+| Embedding width | `vector_dims(embedding)` -> `1024` in both tenant schemas |
 | Consolidation | worker log: `[CONSOLIDATION] bank=smoke ... tenant: user_hermes_agent` |
-| Audit log | 9 rows: `retain`, `recall`, `consolidation`, `webhook_delivery` |
-| Webhooks | sink received signed `POST /hindsight` with `x-hindsight-signature` + `consolidation.completed` body, 200 OK |
-| Smoke test | `scripts/smoke-test.ps1` -> all checks passed |
-| Embedding swap | wiped both tenant schemas (old bge-m3 vectors), started from DeepInfra Qwen3: `vector(1024)` recreated, smoke test green, API healthy in ~10s |
-| Footprint after the swap | images 35.7 GB -> **3.39 GB**, volumes 3.6 GB -> **73 MB**, VRAM freed |
-| Failover model | DeepInfra `deepseek-ai/DeepSeek-V4.1-Flash-1017` answered `pong` over `/v1/openai/chat/completions` |
-| Reranker | recall trace: `rerank | cohere | Qwen/Qwen3-Reranker-0.6B | success`; adapter log `docs=2 top=0.9997 took_ms=1045 cost=$0.0000024` |
+| Webhooks | sink received signed `retain.completed` and `consolidation.completed` POSTs (HMAC verified), HTTP 200 |
+| Credential masking | worker logs `Database connected: postgresql://***:***@db:5432/hindsight` |
+| Resource caps | `docker inspect`: api 1 GB / 1.5 cpu, worker+db 768 MB, cp 192 MB, adapter 96 MB, sink 64 MB |
+| Adapter hardening | 200 on a valid rerank; 413 for >512 docs; 400 for a path-traversal model id; 400 for invalid JSON; 404 drained |
+| Smoke tests | PowerShell and bash both green |
 
 ---
 
-## 8. No local models in this repo
+## 8. Security notes
 
-Embeddings and reranking are both remote, so the stack runs on any machine with
-Docker and **no GPU**:
-
-| Stage | Where it runs |
-|---|---|
-| Embeddings | `Qwen/Qwen3-Embedding-0.6B` on DeepInfra |
-| Reranking | `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, via `rerank-adapter` |
-| LLM | `deepseek-flash` on DeepSeek, failover to DeepInfra |
-
-Hosting BGE-M3 locally was tried and removed on purpose: it cost a 32 GB image,
-a 3.5 GB weight volume, 4.4 GB VRAM and a 60-135 s cold start, and it protected
-nothing that was not already leaving the machine (retain sends content to
-DeepSeek, recall sends candidates to DeepInfra). The recipe still lives in
-`truongvinh57/bge-m3-deploy` and in this repo's git history if you ever want it
-back — but note it is **not** a drop-in swap: BGE-M3 and Qwen3-Embedding are
-different vector spaces at the same 1024 width, so Hindsight would not notice
-and every memory would need re-ingesting.
-
-**Reranker is remote too** — DeepInfra's Qwen3-Reranker-0.6B, reached through
-`rerank-adapter`: — it is DeepInfra's Qwen3-Reranker-0.6B,
-reached through `rerank-adapter`:
-
-```
-Hindsight --(Cohere /rerank)--> rerank-adapter --(DeepInfra inference API)--> Qwen3-Reranker-0.6B
-```
-
-DeepInfra's contract is `POST /v1/inference/<model>` with
-`{"queries": [...], "documents": [...]}` and a flat `{"scores": [...]}` reply —
-not the Cohere shape Hindsight sends. The adapter is ~150 lines of Python
-standard library, mounted into a stock `python:3.12-slim` container: nothing to
-build, no model weights, stateless. Health at `GET /health`, one log line per
-rerank with document count, top score, latency and DeepInfra cost.
-
-To move reranking back to OpenRouter, set
-`HINDSIGHT_API_RERANKER_PROVIDER=openrouter` plus the
-`HINDSIGHT_API_RERANKER_OPENROUTER_*` variables instead; to do it on a local GPU,
-use TEI with `BAAI/bge-reranker-v2-m3` (native `/rerank`) and
-`HINDSIGHT_API_RERANKER_PROVIDER=tei`.
-
-The adapter lives in `adapters/deepinfra-rerank/`.
+- **Secrets**: only in `.env` (gitignored, `.env*` covered). Nothing is committed.
+- **Ports**: loopback by default. `BIND_ADDR=0.0.0.0` is an explicit opt-in;
+  the API/CP have no TLS of their own.
+- **Control Plane access key is a tenant credential** — it authenticates to the
+  API as `hermes-agent`.
+- **Webhook allowlist** is hostname-only by design (see §5).
+- **Logs**: the worker's startup line carries the database URL upstream; the
+  `worker-entrypoint` wrapper masks credentials before they reach the log driver,
+  and forwards SIGTERM so tasks are still handed back on shutdown.
+- **Stored content**: LLM tracing keeps prompts/responses (8 000 chars, 7 days)
+  and the audit log keeps 90 days of mutating calls. Both are per-tenant schema.
+- **Caps**: see §2 — a runaway container fails alone instead of taking the VM.
 
 ---
 
@@ -301,13 +309,18 @@ The adapter lives in `adapters/deepinfra-rerank/`.
 
 | Symptom | Cause / fix |
 |---|---|
-| `api` restarts every ~5 min | `/health` failing before models/migrations finish — raise `start_period`, check `docker compose logs api` |
+| `required variable X is missing a value` | no `.env` — `cp .env.example .env`, fill it |
+| Smoke test says "template placeholders" | `.env` still has `change-me`/`sk-your-…` values |
+| `api` unhealthy after 3 min | check `docker compose logs api`; first start runs migrations for every tenant |
+| `db` marked unhealthy on first boot | raise `start_period` on the db healthcheck (initdb on a slow disk); the 60s default covers most |
+| `FATAL: sorry, too many clients already` | lower `DB_POOL_MAX_SIZE`/`WORKER_DB_POOL_MAX_SIZE` (api+worker pools must stay under the db's `max_connections=60`) |
 | `401` with a correct-looking key | key contains a comma or non-ASCII, or `api`/`worker` were not both restarted |
-| Everything 500 on first request | schema migration for that tenant still running (first request per user pays it) — retry after a few seconds, or pre-provision |
 | Recall returns nothing for a user | that user's schema has no data yet; recall is per schema, per bank |
-| Webhook deliveries missing | the sink is private: keep `HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS` covering it, and check `HINDSIGHT_API_WEBHOOK_EVENT_TYPES` |
-| Reranker 5xx | check `docker compose logs rerank-adapter`: it reproduces the DeepInfra error body, and 402/401 there means the DeepInfra key or balance |
 | Recall quality suddenly bad after a model change | vectors from two embedding models are mixed in one index; Hindsight does not warn when the width matches. Wipe the tenant schemas and re-ingest. |
+| Webhook deliveries missing | the sink is private: keep `HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS` covering it, and check `HINDSIGHT_API_WEBHOOK_EVENT_TYPES` |
+| Model calls time out on a proxied network | set `HTTP_PROXY`/`HTTPS_PROXY` in `.env`; `NO_PROXY` already keeps compose service names direct. Image pulls need the Docker daemon's own proxy config. |
+| Reranker 5xx | `docker compose logs rerank-adapter` reproduces the DeepInfra error body; 401/402 there means the key or balance |
+| SELinux host: API cannot import the extension | add `:z` to the `./extensions:/app/extensions:ro` mount (Fedora/RHEL) |
 
 ---
 
@@ -315,11 +328,14 @@ The adapter lives in `adapters/deepinfra-rerank/`.
 
 ```
 hindsight-deploy/
-├── docker-compose.yml        # the stack, all non-secret config
-├── .env                      # secrets (gitignored)
-├── .env.example              # template
-├── extensions/               # vendored static-keys tenant extension (MIT)
-├── adapters/deepinfra-rerank/ # Cohere /rerank -> DeepInfra translation (stdlib)
-├── scripts/                  # smoke tests, key minting
-└── docs/decisions.md         # why each choice was made, with evidence
+├── docker-compose.yml          # the stack: all non-secret config, caps, tuning
+├── .env.example                # every variable, with a "tiny host" override set
+├── extensions/                 # vendored static-keys tenant extension (MIT)
+├── adapters/deepinfra-rerank/  # Cohere /rerank -> DeepInfra translation (stdlib)
+├── scripts/
+│   ├── smoke-test.sh|ps1       # verification, both platforms
+│   ├── mint-keys.sh|ps1        # generate the bearer keys/secrets
+│   └── worker-entrypoint.py    # PID 1 for the worker: masking + signal forwarding
+├── docs/decisions.md           # why each choice was made, with evidence
+└── LICENSE                     # MIT
 ```
