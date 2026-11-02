@@ -184,17 +184,17 @@ to `<base>/v1/systemone`, and OpenRouter serves exactly that at
 `https://openrouter.ai/api/v1/systemone`, so the base URL is
 `https://openrouter.ai/api`. No adapter is involved.
 
-**Recall is ranked by Jev** (`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=typesafe`):
-for each candidate Jev answers *"would showing this memory help someone answering
-the question, rather than distract them?"*. Measured against the Qwen3-Reranker on
-the same bank, this lifts the actionable fact to #1 and drops a superseded
-"we don't need backups" decision from #1 to #8 — see `docs/decisions.md` §13.
+**Recall is ranked by the Qwen3-Reranker**, and `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`
+collapses a raw fact into the observation that superseded it, so a stale decision
+shows once, labelled as rejected.
 
-The Qwen3-Reranker path is still wired as a one-line fallback: set
-`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none` and recall ranks with
-`Qwen/Qwen3-Reranker-0.6B` (via `rerank-adapter`) instead. Trade-off: Jev puts
-OpenRouter on the recall path (an OpenRouter outage makes recall fail, where the
-reranker path would only lose consolidation triage).
+This is the deliberate stability choice. Ranking with **Jev** measures slightly
+better — on the same bank it puts the current rule at #1 and the superseded
+"we don't need backups" decision at #8, where the reranker keeps the rejected
+decision first (framed as rejected) — but Jev would put **OpenRouter on the read
+path**: an OpenRouter outage would break recall outright, while today it only
+degrades consolidation triage and reflect. Exact measurements, cost and the
+one-line switch are in `docs/decisions.md` §13.
 
 ### Features enabled
 

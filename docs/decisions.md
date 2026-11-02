@@ -335,15 +335,39 @@ the superseded decision is context, not the answer. Jev put the answer at #1 and
 the stale decision at #8; Qwen3 did the opposite. Latency on the real recall was
 1 119 ms (Jev) against 1 100 ms (Qwen3).
 
-### What changed
+### Outcome: stability wins for this deployment, quality is recovered a cheaper way
 
-`HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: typesafe`. The reranker stays
-wired for a one-line rollback (`none`) and is still used by nothing else, which
-is why it remains in the compose file rather than being deleted: the rollback is
-a config flip, not a re-add.
+Jev was switched on, measured, and then switched **back off** on the stable path.
+The deciding factor is not the ranking, it is the blast radius:
 
-Reliability note: Jev raises on failure (upstream no longer degrades silently), and
-`reranking.py` only catches its own timeout, so an OpenRouter outage makes recall
-fail outright. With the reranker on recall, an OpenRouter outage would only cost
-consolidation triage — that is the price of the better ranking, stated here so it
-is a decision and not a surprise.
+| | reranker on recall | Jev on recall |
+|---|---|---|
+| providers recall depends on | DeepInfra (already mandatory for embeddings) | DeepInfra **and** OpenRouter |
+| OpenRouter outage | consolidation triage + reflect degrade (reflect handles it: `decision_model_failed`) | **recall fails** |
+| DeepInfra outage | recall fails either way (embeddings) | recall fails either way |
+| cost per recall (30 candidates) | $0.0000278 | $0.0000767 |
+
+So `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER: none` — Jev stays on
+consolidation triage and knowledge-page impact, where failure is not fatal.
+
+The quality problem Jev was fixing (a superseded decision ranking first) is
+handled instead by `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`: when an
+observation is returned, the raw facts it was consolidated from are dropped, so
+the stale decision appears once, as its observation, and that observation says it
+was rejected. Measured on the same bank and query:
+
+| rank | Qwen3, prefer_observations off | Qwen3, prefer_observations on | Jev |
+|---|---|---|---|
+| 1 | stale "không cần backup" fact | "quyết định cũ ... **đã bị bác bỏ**" (observation) | the current rule |
+| 2 | "was rejected" observation | the current rule | the current rule (chunk) |
+| 3 | the current rule | restore procedure | "was rejected" observation |
+| 8 | restore procedure | — | stale "không cần backup" fact |
+
+Both stable-path rows now read correctly: the rejected decision is either second
+and labelled, or first and labelled — never an unqualified stale claim. The cost
+is detail: preferring observations trades granular fact text for the consolidated
+summary (per-request `prefer_observations` still overrides the default).
+
+If ranking quality ever matters more than that independence, the switch is one
+line (`typesafe`); the trade-off is recorded here so it is a decision, not a
+surprise.
