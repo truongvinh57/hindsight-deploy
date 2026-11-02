@@ -11,7 +11,8 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
   `deepseek-ai/DeepSeek-V4.1-Flash-1017`
 - Embeddings: `Qwen/Qwen3-Embedding-0.6B` on DeepInfra (1024-dim)
 - Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, through `rerank-adapter`
-- Decision model: `typesafe/jev-1.14` through OpenRouter's System One API
+- Decision model (Jev): **optional, off by default** — measured as pure overhead at
+  this workload's size; see §5
 - **No GPU, no local model, no build step.**
 
 ---
@@ -44,7 +45,7 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 ```
 
 External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover, embeddings,
-reranker via `rerank-adapter`), OpenRouter (Jev decision model).
+reranker via `rerank-adapter`). Optional: OpenRouter (Jev decision model).
 
 **Why nothing is built:** the multi-user tenant extension is not published to
 PyPI, but the server imports extensions from `PYTHONPATH`. The package is
@@ -89,7 +90,7 @@ Idle usage is far lower (~0.9 GB total measured). Raise the caps per machine in
 
 ```bash
 git clone https://github.com/truongvinh57/hindsight-deploy.git && cd hindsight-deploy
-cp .env.example .env          # then fill in the six required secrets
+cp .env.example .env          # then fill in five required secrets (OpenRouter is optional)
 docker compose up -d
 ./scripts/smoke-test.sh       # Windows: .\scripts\smoke-test.ps1
 ```
@@ -177,12 +178,20 @@ anchor is shared by api and worker); secrets and per-machine overrides live in
 | Vision | `HINDSIGHT_API_VLM_*` | `deepseek` / `deepseek-flash` (text+image) |
 | Embeddings | `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` | `Qwen/Qwen3-Embedding-0.6B`, 1024 dims, query instruction |
 | Reranker | `HINDSIGHT_API_RERANKER_COHERE_*` -> adapter | `Qwen/Qwen3-Reranker-0.6B` |
-| Decision model | `HINDSIGHT_API_DECISION_MODEL_*` | provider `typesafe`, base `https://openrouter.ai/api`, model `typesafe/jev-1.14` |
+| Decision model (optional) | `HINDSIGHT_API_DECISION_MODEL_*` | default `none`. Set `typesafe` + `OPENROUTER_API_KEY` to enable Jev (base `https://openrouter.ai/api`, model `typesafe/jev-1.14`) |
 
 Jev is not a chat model: Hindsight's `typesafe` provider posts System One bodies
 to `<base>/v1/systemone`, and OpenRouter serves exactly that at
-`https://openrouter.ai/api/v1/systemone`, so the base URL is
+`https://openrouter.ai/api/v1/systemone`, so the base URL would be
 `https://openrouter.ai/api`. No adapter is involved.
+
+**It is off by default here, on measurement.** Jev's jobs are typed decisions, not
+ranking: consolidation triage (how a new fact relates to existing observations),
+knowledge-page impact, and reflect's evidence-sufficiency check. A 2-fact
+consolidation with Jev on made **5 triage calls (+5 170 tokens, +4.5 s) and saved
+zero LLM calls**; the ~40 % LLM-call saving upstream reports needs much larger
+batches, and this deployment has no knowledge pages or mental models. So the
+stable path is the plain LLM one, with one fewer provider and one fewer key.
 
 **Recall is ranked by the Qwen3-Reranker**, and `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS=true`
 collapses a raw fact into the observation that superseded it, so a stale decision
@@ -284,7 +293,7 @@ Windows 11 + Docker Desktop, Docker 29.9 / Compose 5.6.
 | Check | Evidence |
 |---|---|
 | Isolation | retain as hermes-agent is invisible to deepseek-harness (404 on the other tenant's bank); `\dn` lists both schemas |
-| Model calls | `llm_requests`: `embedding_* | openai | Qwen/Qwen3-Embedding-0.6B`, `retain_extract_facts | deepseek | deepseek-flash`, `rerank | cohere | Qwen/Qwen3-Reranker-0.6B`, `decision_consolidation_triage | typesafe | typesafe/jev-1.14` — all `success` |
+| Model calls | `llm_requests`: `embedding_* | openai | Qwen/Qwen3-Embedding-0.6B`, `retain_extract_facts | deepseek | deepseek-flash`, `rerank | cohere | Qwen/Qwen3-Reranker-0.6B`, and (with the decision model on) `decision_consolidation_triage | typesafe | typesafe/jev-1.14` — all `success` |
 | Embedding width | `vector_dims(embedding)` -> `1024` in both tenant schemas |
 | Consolidation | worker log: `[CONSOLIDATION] bank=smoke ... tenant: user_hermes_agent` |
 | Webhooks | sink received signed `retain.completed` and `consolidation.completed` POSTs (HMAC verified), HTTP 200 |

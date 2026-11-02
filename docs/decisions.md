@@ -371,3 +371,30 @@ summary (per-request `prefer_observations` still overrides the default).
 If ranking quality ever matters more than that independence, the switch is one
 line (`typesafe`); the trade-off is recorded here so it is a decision, not a
 surprise.
+
+### Jev as consolidation triage: measured, then turned off here
+
+Same bank content, same two retains, consolidated once with Jev on and once off:
+
+| | Jev ON | Jev OFF |
+|---|---|---|
+| `decision_consolidation_triage` | 5 calls, 5 170 tokens, 913 ms avg | — |
+| `consolidation` (LLM) | 2 calls, 9 485 tokens | 2 calls, 9 716 tokens |
+| total model calls | 7 | **2** |
+| consolidation wall time | ~4.5 s of triage on top | 2.4 s |
+
+At two new facts per consolidation, Jev adds five triage calls and roughly the
+same LLM work — it is overhead, not a saving. Upstream's "~40 % fewer LLM calls at
+the same pass rate" is measured on evals with far larger consolidation batches,
+where triage resolves most facts without an LLM call. This deployment retains a
+handful of items at a time and has no knowledge pages or mental models, so neither
+of Jev's other jobs applies.
+
+Decision: `HINDSIGHT_API_DECISION_MODEL_PROVIDER=none` by default, and
+`OPENROUTER_API_KEY` becomes optional. The difference from a reranker matters
+here — a reranker scores (query, document) relevance, so it cannot stand in for a
+typed decision like "does this new fact restate, extend or contradict that
+observation". Disabling the decision model does not hand that work to the
+reranker; it falls back to the consolidation LLM path upstream keeps for exactly
+this case. Re-enable with `DECISION_MODEL_PROVIDER=typesafe` plus an OpenRouter
+key if batches grow enough for triage to pay off.
