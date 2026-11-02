@@ -90,7 +90,7 @@ Idle usage is far lower (~0.9 GB total measured). Raise the caps per machine in
 
 ```bash
 git clone https://github.com/truongvinh57/hindsight-deploy.git && cd hindsight-deploy
-cp .env.example .env          # then fill in five required secrets (OpenRouter is optional)
+cp .env.example .env          # then fill in the required secrets (OpenRouter is optional)
 docker compose up -d
 ./scripts/smoke-test.sh       # Windows: .\scripts\smoke-test.ps1
 ```
