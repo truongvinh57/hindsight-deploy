@@ -30,8 +30,8 @@ Get-Content $envFile | ForEach-Object {
   if ($_ -match '^\s*([A-Z0-9_]+)=(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() }
 }
 $hermes  = $cfg["HERMES_API_KEY"]
-$harness = $cfg["DEEPSEEK_HARNESS_API_KEY"]
-if (-not $hermes -or -not $harness) { throw "HERMES_API_KEY / DEEPSEEK_HARNESS_API_KEY missing from .env" }
+$cherry = $cfg["CHERRY_STUDIO_API_KEY"]
+if (-not $hermes -or -not $cherry) { throw "HERMES_API_KEY / CHERRY_STUDIO_API_KEY missing from .env" }
 # Jev (the decision model) is on by default, so its key is a required secret.
 if (-not $cfg["OPENROUTER_API_KEY"]) { throw "OPENROUTER_API_KEY missing from .env (required: the decision model, Jev, uses it)" }
 
@@ -46,7 +46,7 @@ $pgUser = if ($cfg["POSTGRES_USER"]) { $cfg["POSTGRES_USER"] } else { "hindsight
 $pgDb   = if ($cfg["POSTGRES_DB"])   { $cfg["POSTGRES_DB"] }   else { "hindsight" }
 
 $H = @{ Authorization = "Bearer $hermes"; "Content-Type" = "application/json" }
-$D = @{ Authorization = "Bearer $harness"; "Content-Type" = "application/json" }
+$D = @{ Authorization = "Bearer $cherry"; "Content-Type" = "application/json" }
 $compose = Join-Path $ComposeDir "docker-compose.yml"
 
 Write-Host "API $ApiUrl / Control Plane $CpUrl"
@@ -89,9 +89,9 @@ function RecallCount($headers) {
   return 0
 }
 
-Check "deepseek-harness is isolated from hermes-agent" {
+Check "cherry-studio is isolated from hermes-agent" {
   $n = RecallCount $D
-  if ($n -gt 0) { throw "leak: deepseek-harness saw hermes-agent memories" }
+  if ($n -gt 0) { throw "leak: cherry-studio saw hermes-agent memories" }
 }
 
 Check "hermes-agent recalls its own memory" {
@@ -102,7 +102,7 @@ Check "hermes-agent recalls its own memory" {
 Check "tenant schemas exist in Postgres" {
   $out = docker compose -f $compose exec -T db psql -U $pgUser -d $pgDb -tAc "select nspname from pg_namespace where nspname like 'user_%' order by 1" 2>&1 | Out-String
   if ($out -notmatch "user_hermes_agent") { throw "user_hermes_agent schema missing" }
-  if ($out -notmatch "user_deepseek_harness") { throw "user_deepseek_harness schema missing" }
+  if ($out -notmatch "user_cherry_studio") { throw "user_cherry_studio schema missing" }
 }
 
 Check "worker health" {

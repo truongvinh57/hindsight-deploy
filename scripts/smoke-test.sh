@@ -35,13 +35,13 @@ if grep -qE '=(change-me|sk-your-deepseek|sk-di-your|sk-or-v1-your|hk_change|dk_
 fi
 
 HERMES="$(env_get HERMES_API_KEY)"
-HARNESS="$(env_get DEEPSEEK_HARNESS_API_KEY)"
+CHERRY="$(env_get CHERRY_STUDIO_API_KEY)"
 PGUSER="${POSTGRES_USER:-$(env_get POSTGRES_USER)}"
 PGUSER="${PGUSER:-hindsight}"
 PGDB="${POSTGRES_DB:-$(env_get POSTGRES_DB)}"
 PGDB="${PGDB:-hindsight}"
 
-[ -n "$HERMES" ] && [ -n "$HARNESS" ] || { echo "HERMES_API_KEY / DEEPSEEK_HARNESS_API_KEY missing from .env"; exit 1; }
+[ -n "$HERMES" ] && [ -n "$CHERRY" ] || { echo "HERMES_API_KEY / CHERRY_STUDIO_API_KEY missing from .env"; exit 1; }
 OPENROUTER="$(env_get OPENROUTER_API_KEY)"
 [ -n "$OPENROUTER" ] || { echo "OPENROUTER_API_KEY missing from .env (required: the decision model, Jev, uses it)"; exit 1; }
 
@@ -65,14 +65,14 @@ code="$(http_code -X POST "$API/v1/default/banks/smoke/memories" \
   -H "Authorization: Bearer $HERMES" -H 'Content-Type: application/json' -d "$BODY")"
 [ "$code" = "200" ] && pass "hermes-agent retain" || bad "hermes-agent retain" "status $code"
 
-# The bank does not exist in deepseek-harness's schema: 404 is isolation working.
-harness_out="$(curl -s --max-time 120 -X POST "$API/v1/default/banks/smoke/memories/recall" \
-  -H "Authorization: Bearer $HARNESS" -H 'Content-Type: application/json' \
+# The bank does not exist in cherry-studio's schema: 404 is isolation working.
+cherry_out="$(curl -s --max-time 120 -X POST "$API/v1/default/banks/smoke/memories/recall" \
+  -H "Authorization: Bearer $CHERRY" -H 'Content-Type: application/json' \
   -d '{"query":"What is the deployment codename?"}')"
-if printf '%s' "$harness_out" | grep -qiE 'Sea Otter|codename'; then
-  bad "deepseek-harness is isolated" "leaked hermes-agent memories"
+if printf '%s' "$cherry_out" | grep -qiE 'Sea Otter|codename'; then
+  bad "cherry-studio is isolated" "leaked hermes-agent memories"
 else
-  pass "deepseek-harness is isolated"
+  pass "cherry-studio is isolated"
 fi
 
 hermes_out="$(curl -s --max-time 120 -X POST "$API/v1/default/banks/smoke/memories/recall" \
@@ -94,10 +94,10 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   else
     bad "schema user_hermes_agent" "missing (got: $(printf '%s' "$schemas" | tr '\n' ' '))"
   fi
-  if printf '%s' "$schemas" | grep -q user_deepseek_harness; then
-    pass "schema user_deepseek_harness"
+  if printf '%s' "$schemas" | grep -q user_cherry_studio; then
+    pass "schema user_cherry_studio"
   else
-    bad "schema user_deepseek_harness" "missing"
+    bad "schema user_cherry_studio" "missing"
   fi
 
   # The runtime image ships no curl.

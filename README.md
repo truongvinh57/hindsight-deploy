@@ -5,10 +5,11 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 `.env`, run one smoke test.
 
 - Hindsight **1.1.0**, upstream images, **nothing is built here**
-- Users: **hermes-agent** (primary) and **deepseek-harness**, one bearer key and
-  one PostgreSQL schema each (`user_hermes_agent`, `user_deepseek_harness`)
-- LLM: DeepSeek `deepseek-flash` (also the vision slot), failover to DeepInfra
-  `deepseek-ai/DeepSeek-V4.1-Flash-1017`
+- Users: **hermes-agent** (primary, and the control-plane's data-plane key) and
+  **cherry-studio** (MCP), one bearer key and one PostgreSQL schema each
+  (`user_hermes_agent`, `user_cherry_studio`)
+- LLM: DeepInfra `deepseek-ai/DeepSeek-V4.1-Flash-1017`, also the vision slot
+  (DeepSeek's own API was dropped after repeated 500/503 and SSL hangs)
 - Embeddings: `Qwen/Qwen3-Embedding-0.6B` on DeepInfra (1024-dim)
 - Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, through `rerank-adapter`
 - Decision model (Jev 1.14, via OpenRouter): **on by default** — it does the jobs
@@ -130,11 +131,11 @@ a PostgreSQL schema:
 | User | Schema | Key variable |
 |---|---|---|
 | `hermes-agent` | `user_hermes_agent` | `HERMES_API_KEY` |
-| `deepseek-harness` | `user_deepseek_harness` | `DEEPSEEK_HARNESS_API_KEY` |
+| `cherry-studio` | `user_cherry_studio` | `CHERRY_STUDIO_API_KEY` |
 
 ```bash
 curl -H "Authorization: Bearer $HERMES_API_KEY" http://localhost:8888/v1/default/banks
-curl -H "Authorization: Bearer $DEEPSEEK_HARNESS_API_KEY" http://localhost:8888/v1/default/banks
+curl -H "Authorization: Bearer $CHERRY_STUDIO_API_KEY" http://localhost:8888/v1/default/banks
 ```
 
 Unknown or missing keys return `401`. A user never sees another user's schema —
@@ -295,7 +296,7 @@ docker compose exec db psql -U "${POSTGRES_USER:-hindsight}" -d "${POSTGRES_DB:-
 ```
 
 Checks: API health, 401 on a bad key, per-user isolation (retain as hermes-agent,
-recall as deepseek-harness → nothing), the tenant schemas in Postgres, worker
+recall as cherry-studio → nothing), the tenant schemas in Postgres, worker
 health, that the **decision model (Jev) is configured** for the write path while
 **recall still ranks with the reranker**, control-plane reachability (follows its
 307 to `/login`), webhook sink. The bash script skips the database/worker/model
@@ -308,8 +309,8 @@ Windows 11 + Docker Desktop, Docker 29.9 / Compose 5.6.
 
 | Check | Evidence |
 |---|---|
-| Isolation | retain as hermes-agent is invisible to deepseek-harness (404 on the other tenant's bank); `\dn` lists both schemas |
-| Model calls | `llm_requests`: `retain | deepseek | deepseek-flash`, `retain | openai | Qwen/Qwen3-Embedding-0.6B`, `consolidation | typesafe | typesafe/jev-1.14` (Jev triage), `consolidation | deepseek | deepseek-flash`, `recall | cohere | Qwen/Qwen3-Reranker-0.6B` — all `success` |
+| Isolation | retain as hermes-agent is invisible to cherry-studio (404 on the other tenant's bank); `\dn` lists both schemas |
+| Model calls | `llm_requests`: `retain | openai | deepseek-ai/DeepSeek-V4.1-Flash-1017`, `retain | openai | Qwen/Qwen3-Embedding-0.6B`, `consolidation | typesafe | typesafe/jev-1.14` (Jev triage), `consolidation | openai | deepseek-ai/DeepSeek-V4.1-Flash-1017`, `recall | cohere | Qwen/Qwen3-Reranker-0.6B` — all `success` |
 | Embedding width | `vector_dims(embedding)` -> `1024` in both tenant schemas |
 | Consolidation | worker log: `[CONSOLIDATION] bank=smoke ... tenant: user_hermes_agent` |
 | Webhooks | sink received signed `retain.completed` and `consolidation.completed` POSTs (HMAC verified), HTTP 200 |

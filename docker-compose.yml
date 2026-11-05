@@ -51,23 +51,26 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_DB_POOL_MIN_SIZE: "${DB_POOL_MIN_SIZE:-2}"
   HINDSIGHT_API_DB_POOL_MAX_SIZE: "${DB_POOL_MAX_SIZE:-12}"
 
-  # ── LLM: DeepSeek primary, DeepInfra failover (multi-LLM strategy) ──────
-  HINDSIGHT_API_LLM_PROVIDER: deepseek
-  HINDSIGHT_API_LLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required - cp .env.example .env and fill it}
-  HINDSIGHT_API_LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
-  HINDSIGHT_API_LLM_BASE_URL: https://api.deepseek.com
-  HINDSIGHT_API_LLM_TIMEOUT: "${LLM_TIMEOUT:-180}"
+  # ── LLM: DeepInfra only ─────────────────────────────────────────────────
+  # DeepSeek's own API frequently returned 500/503 "Service is too busy" and
+  # could hang on SSL read, stalling retain for minutes. DeepInfra serves the
+  # same DeepSeek model and has been reliable, so it is the only provider now:
+  # no LLM_1_* members and no LLM_STRATEGY means Hindsight uses the primary
+  # alone (MemoryEngine falls back to the bare `base` provider when the member
+  # list is empty).
+  HINDSIGHT_API_LLM_PROVIDER: openai
+  HINDSIGHT_API_LLM_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required - cp .env.example .env and fill it}
+  HINDSIGHT_API_LLM_MODEL: ${LLM_MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}
+  HINDSIGHT_API_LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepinfra.com/v1/openai}
+  # Shorter than the old 180s: a stuck upstream call should surface quickly
+  # rather than block a retain for three minutes.
+  HINDSIGHT_API_LLM_TIMEOUT: "${LLM_TIMEOUT:-60}"
   HINDSIGHT_API_LLM_MAX_CONCURRENT: "${LLM_MAX_CONCURRENT:-5}"
-  HINDSIGHT_API_LLM_STRATEGY: '{"mode": "failover"}'
-  HINDSIGHT_API_LLM_1_PROVIDER: openai
-  HINDSIGHT_API_LLM_1_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required - cp .env.example .env and fill it}
-  HINDSIGHT_API_LLM_1_BASE_URL: https://api.deepinfra.com/v1/openai
-  HINDSIGHT_API_LLM_1_MODEL: ${LLM_FALLBACK_MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}
-  # Vision slot: deepseek-flash is multimodal (text+image), so retain chunks
-  # carrying screenshots go to it instead of being refused.
-  HINDSIGHT_API_VLM_PROVIDER: deepseek
-  HINDSIGHT_API_VLM_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
-  HINDSIGHT_API_VLM_MODEL: ${LLM_MODEL:-deepseek-flash}
+  # Vision slot: serve it from DeepInfra too, on the same model.
+  HINDSIGHT_API_VLM_PROVIDER: openai
+  HINDSIGHT_API_VLM_API_KEY: ${DEEPINFRA_API_KEY:?DEEPINFRA_API_KEY is required}
+  HINDSIGHT_API_VLM_BASE_URL: ${VLM_BASE_URL:-https://api.deepinfra.com/v1/openai}
+  HINDSIGHT_API_VLM_MODEL: ${VLM_MODEL:-deepseek-ai/DeepSeek-V4.1-Flash-1017}
 
   # ── Embeddings: Qwen3-Embedding-0.6B on DeepInfra, 1024-dim ────────────
   # No model is hosted locally: no GPU, no ~32 GB image.
@@ -144,7 +147,7 @@ x-hindsight-env: &hindsight-env
   # ── Multi-user: static keys, one Postgres schema per user ──────────────
   HINDSIGHT_API_TENANT_EXTENSION: hindsight_ext_static_keys_tenant:StaticKeysTenantExtension
   HINDSIGHT_API_TENANT_SCHEMA_PREFIX: user
-  HINDSIGHT_API_TENANT_USERS: "hermes-agent:${HERMES_API_KEY:?HERMES_API_KEY is required - cp .env.example .env and fill it},deepseek-harness:${DEEPSEEK_HARNESS_API_KEY:?DEEPSEEK_HARNESS_API_KEY is required - cp .env.example .env and fill it}"
+  HINDSIGHT_API_TENANT_USERS: "hermes-agent:${HERMES_API_KEY:?HERMES_API_KEY is required - cp .env.example .env and fill it},cherry-studio:${CHERRY_STUDIO_API_KEY:?CHERRY_STUDIO_API_KEY is required - cp .env.example .env and fill it}"
 
   # ── Full-feature switches ───────────────────────────────────────────────
   HINDSIGHT_API_ENABLE_OBSERVATIONS: "true"

@@ -12,6 +12,6 @@ function Rand([int]$n) {
 Write-Output "# paste into .env"
 Write-Output ("POSTGRES_PASSWORD=" + (Rand $Bytes))
 Write-Output ("HERMES_API_KEY=hk_" + (Rand $Bytes))
-Write-Output ("DEEPSEEK_HARNESS_API_KEY=dk_" + (Rand $Bytes))
+Write-Output ("CHERRY_STUDIO_API_KEY=cs_" + (Rand $Bytes))
 Write-Output ("HINDSIGHT_CP_ACCESS_KEY=" + (Rand 16))
 Write-Output ("WEBHOOK_SECRET=whsec_" + (Rand 20))
