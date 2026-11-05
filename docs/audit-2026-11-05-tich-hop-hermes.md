@@ -1,7 +1,31 @@
 # Rà soát Hindsight trước khi tích hợp vào Hermes — 05/11/2026
 
-Phạm vi: stack `~/hindsight-deploy` (Hindsight 1.1.0, 6 container), tenant `hermes-agent`
-và `cherry-studio`, MCP của Cherry Studio, và tình trạng patch của `~/hermes-deploy`.
+> **Cập nhật cuối ngày 05/11 (đã thực hiện):**
+> - Nâng Hindsight **1.1.0 → 1.2.0** (api/worker `1.2.0-slim`, CP `1.2.0`); migration chạy
+>   thành công, dữ liệu cũ còn nguyên (hermes bank 1, cherry doc 1). Dump rollback một lần:
+>   `~/NTC-Backups/hindsight/20261105/pre-1.2.0-full.dump`.
+> - Bỏ tenant `deepseek-harness` (backup + restore thử trước khi drop), CP thấy bank `hermes`.
+> - Xóa repo `hermes-deploy` (local và GitHub) — patch `dashboard-select-none` không còn;
+>   nó vốn không áp trên v0.22.7 và không cần cho Hindsight.
+> - Gỡ plugin OpenViking khỏi Hermes: `memory.openviking` đã unset, 4 biến `OPENVIKING_*`
+>   của plugin đã xóa (giữ `OPENVIKING_ADMIN_KEY`), plugin dir đã remove.
+> - Cài plugin **hindsight 1.2.3**, `memory.provider=hindsight`, bank `hermes`, cấu hình theo
+>   mục 8.1. Đã nghiệm thu end-to-end bằng một lượt CLI: 2 document → 3 memory unit
+>   (2 world + 1 observation), metadata `source=hermes`, `observation_scopes=shared`;
+>   sau đó xóa 2 document test, bank về 0.
+> - **Không triển khai backup/monitoring** theo yêu cầu (chạy local trên máy này); chỉ giữ
+>   dump một lần trước nâng cấp.
+> - Cherry Studio MCP **không chỉnh**; lưu ý API restart làm session MCP cũ mất hiệu lực —
+>   mở lại Cherry Studio khi cần.
+> - Lưu ý môi trường: `hermes plugins install` sync dependency vào PM env mới
+>   (`afec28…`), nhưng gateway đang chạy dùng env cũ (`7258…`). Đã cài
+>   `hindsight-client`/`hindsight-embed` 0.10.3 vào cả hai PM env và venv 3.11 để mọi
+>   đường chạy đều có module. Nếu phiên desktop vẫn báo thiếu module, khởi động lại Hermes
+>   một lần.
+
+Phạm vi: stack `~/hindsight-deploy` (Hindsight 1.1.0 lúc rà soát, nay 1.2.0), tenant
+`hermes-agent` và `cherry-studio`, MCP của Cherry Studio, và tình trạng patch của
+`~/hermes-deploy` (nay đã xóa).
 
 ## 1. Kết luận nhanh
 
@@ -27,7 +51,7 @@ và `cherry-studio`, MCP của Cherry Studio, và tình trạng patch của `~/h
 | Hạng mục | Kết quả | Bằng chứng |
 |---|---|---|
 | Container | 6/6 healthy, restart=unless-stopped | `docker compose ps` |
-| Phiên bản | Hindsight `1.1.0-slim`; CP `1.1.0`; Postgres `pgvector:pg18`, extension `vector 0.8.7` | `docker ps`, `pg_extension` |
+| Phiên bản | Hindsight `1.2.0-slim`; CP `1.2.0`; Postgres `pgvector:pg18`, extension `vector 0.8.7` | `docker ps`, `pg_extension` |
 | Tenant | `hermes-agent`, `cherry-studio` | `HINDSIGHT_API_TENANT_USERS` trong container |
 | Schema | `user_hermes_agent`, `user_cherry_studio` | `\dn` |
 | Dữ liệu | DB 18 MB; hermes 0 bank → nay có bank `hermes` 0 fact; cherry 1 doc / 1 chunk / 0 fact | `pg_database_size`, API banks |
@@ -211,12 +235,22 @@ chạy" nhưng chỉ đọc observation, recall lệch một lượt và không 
 - [ ] Không có 401/timeout trong log Hermes; độ trễ recall chấp nhận được.
 - [ ] Cherry Studio vẫn recall được bank riêng; sau restart Hindsight phải reconnect MCP.
 
-## 9. Việc nên làm tiếp (thứ tự)
+## 9. Việc nên làm tiếp
 
-1. **Backup DB hằng ngày** + restore thử — trước khi tích hợp, vì từ giờ dữ liệu memory là
-   dữ liệu thật.
-2. **Giám sát** `/health` API + CP; cảnh báo container restart.
-3. **Nâng `CP_CPUS`/`CP_MEM_LIMIT`** và `SINK_CPUS` (hoặc bỏ sink) — chi phí gần như bằng 0.
-4. **Đặt `mcp_enabled_tools`** cho bank cherry (chặn delete/clear).
-5. Tích hợp Hermes theo mục 8; đo recall 1 tuần rồi chỉnh `recall_budget`/`recall_min_scores`.
-6. Sau khi ổn định: gỡ OpenViking khỏi Hermes và xóa patch `dashboard-select-none`.
+**Đã xong trong lượt này:** nâng Hindsight 1.2.0; bỏ tenant deepseek; tạo bank `hermes`;
+nâng tài nguyên CP/sink; cài plugin Hindsight 1.2.3 + cấu hình; gỡ OpenViking khỏi Hermes;
+xóa repo `hermes-deploy` (local + GitHub).
+
+**Còn lại:**
+
+1. **Xác nhận trên desktop:** mở một chat mới, hỏi lại “mã kiểm thử Hindsight” sau khi ghi
+   một fact mới; kiểm `fact_count` của bank `hermes` tăng. Nếu log vẫn báo thiếu
+   `hindsight_client`, khởi động lại Hermes một lần (gateway đang giữ PM env cũ).
+2. **Theo dõi 1 tuần** rồi chỉnh `recall_budget` (mid → high nếu bank lớn) và
+   `recall_min_scores` theo số đo thật.
+3. **Tùy chọn:** đặt `mcp_enabled_tools` cho bank `cherry-studio` nếu muốn chặn
+   `delete_bank`/`clear_memories`; theo yêu cầu hiện tại không chỉnh MCP Cherry.
+
+**Không triển khai (theo yêu cầu):** backup định kỳ và giám sát — stack chạy local trên máy
+này. Chỉ giữ một dump rollback trước nâng cấp:
+`~/NTC-Backups/hindsight/20261105/pre-1.2.0-full.dump`.

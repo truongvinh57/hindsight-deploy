@@ -239,7 +239,7 @@ services:
     # ports: ["127.0.0.1:5433:5432"]
 
   api:
-    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.2.0-slim}
     restart: unless-stopped
     stop_grace_period: 75s
     mem_limit: ${API_MEM_LIMIT:-1g}
@@ -273,7 +273,7 @@ services:
       start_period: 180s
 
   worker:
-    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.2.0-slim}
     restart: unless-stopped
     stop_grace_period: 75s
     mem_limit: ${WORKER_MEM_LIMIT:-768m}
@@ -307,7 +307,7 @@ services:
       start_period: 120s
 
   control-plane:
-    image: ${HINDSIGHT_CP_IMAGE:-ghcr.io/vectorize-io/hindsight-control-plane:1.1.0}
+    image: ${HINDSIGHT_CP_IMAGE:-ghcr.io/vectorize-io/hindsight-control-plane:1.2.0}
     restart: unless-stopped
     mem_limit: ${CP_MEM_LIMIT:-192m}
     memswap_limit: ${CP_MEM_LIMIT:-192m}

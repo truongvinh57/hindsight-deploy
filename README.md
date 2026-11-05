@@ -4,7 +4,7 @@ Self-hosted **Hindsight** (agent memory) on Docker: full feature set, several
 isolated users, every model remote. Clone it on any machine with Docker, fill in
 `.env`, run one smoke test.
 
-- Hindsight **1.1.0**, upstream images, **nothing is built here**
+- Hindsight **1.2.0**, upstream images, **nothing is built here**
 - Users: **hermes-agent** (primary, and the control-plane's data-plane key) and
   **cherry-studio** (MCP), one bearer key and one PostgreSQL schema each
   (`user_hermes_agent`, `user_cherry_studio`)
