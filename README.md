@@ -242,6 +242,12 @@ the delivery history.
 
 ---
 
+### Hermes client (bank `hermes`)
+
+Thông số hiện hành của client Hermes: `retain_every_n_turns=3`,
+`recall_budget=low`, `recall_max_tokens=2048`, `recall_sync=false`.
+Chi tiết, lý do và cách kiểm chứng: [docs/hermes-client-20261108.md](docs/hermes-client-20261108.md).
+
 ## 6. Operations
 
 ```bash
