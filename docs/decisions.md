@@ -97,7 +97,7 @@ multipart form data are parsed as single strings and yield one meaningless score
 
 Hindsight's `cohere` provider speaks `{"model","query","documents"}` ->
 `{"results":[{"index","relevance_score"}]}`, so the two are bridged by
-`adapters/deepinfra-rerank/adapter.py` (stdlib only, mounted into
+`adapters/deepinfra-rerank/adapter.py` — **đã gỡ 08/11/2026**, nay dùng LiteLLM `/v1/rerank` (stdlib only, mounted into
 `python:3.12-slim`, nothing built). Verified end to end:
 `rerank | cohere | Qwen/Qwen3-Reranker-0.6B | success` in `llm_requests`, and
 the adapter logged `docs=2 top=0.9997 took_ms=1045 cost=$0.0000024`.

@@ -11,13 +11,20 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 - LLM: DeepInfra `deepseek-ai/DeepSeek-V4.1-Flash-1017`, also the vision slot
   (DeepSeek's own API was dropped after repeated 500/503 and SSL hangs)
 - Embeddings: `Qwen/Qwen3-Embedding-0.6B` on DeepInfra (1024-dim)
-- Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, through `rerank-adapter`
+- Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, **through LiteLLM** (`/v1/rerank`)
 - Decision model (Jev 1.14, via OpenRouter): **on by default** — it does the jobs
   only a decision model can; ranking stays on the reranker (§5)
 - **No GPU, no local model, no build step.**
 
 ---
 
+
+> **Cập nhật 08/11/2026 — bỏ adapter.**
+> Reranker và decision model (Jev) nay đi qua **LiteLLM** (`https://aigateway.newtecons.vn`),
+> không còn container `rerank-adapter`. Lý do: LiteLLM đã có `/v1/rerank` đúng ngữ nghĩa Cohere
+> và `/v1/systemone` native cho `typesafe/jev-1.14`. Đổi lại: Hindsight cần một virtual key
+> LiteLLM (`HINDSIGHT_LITELLM_KEY`) thay vì gọi thẳng DeepInfra/OpenRouter.
+> Mã adapter cũ vẫn xem được trong lịch sử git.
 ## 1. Architecture
 
 ```
@@ -46,7 +53,7 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 ```
 
 External calls: DeepSeek (LLM + vision), DeepInfra (LLM failover, embeddings,
-reranker via `rerank-adapter`), OpenRouter (Jev, the decision model).
+reranker + Jev via LiteLLM), OpenRouter (upstream for Jev).
 
 **Why nothing is built:** the multi-user tenant extension is not published to
 PyPI, but the server imports extensions from `PYTHONPATH`. The package is
@@ -74,7 +81,6 @@ Every container is capped, so the stack cannot eat the host:
 | worker | 768 MB | 1.0 |
 | db | 768 MB | 1.0 |
 | control-plane | 192 MB | 0.5 |
-| rerank-adapter | 96 MB | 0.25 |
 | webhook-sink | 64 MB | 0.1 |
 | **total** | **~2.9 GB** | **4.35** |
 
@@ -358,7 +364,7 @@ Windows 11 + Docker Desktop, Docker 29.9 / Compose 5.6.
 | Recall quality suddenly bad after a model change | vectors from two embedding models are mixed in one index; Hindsight does not warn when the width matches. Wipe the tenant schemas and re-ingest. |
 | Webhook deliveries missing | the sink is private: keep `HINDSIGHT_API_WEBHOOK_ALLOWED_HOSTS` covering it, and check `HINDSIGHT_API_WEBHOOK_EVENT_TYPES` |
 | Model calls time out on a proxied network | set `HTTP_PROXY`/`HTTPS_PROXY` in `.env`; `NO_PROXY` already keeps compose service names direct. Image pulls need the Docker daemon's own proxy config. |
-| Reranker 5xx | `docker compose logs rerank-adapter` reproduces the DeepInfra error body; 401/402 there means the key or balance |
+| Reranker 5xx | gọi thử `POST https://aigateway.newtecons.vn/v1/rerank` bằng key LiteLLM; 401 là key, 5xx là DeepInfra |
 | SELinux host: API cannot import the extension | add `:z` to the `./extensions:/app/extensions:ro` mount (Fedora/RHEL) |
 
 ---
@@ -370,7 +376,6 @@ hindsight-deploy/
 ├── docker-compose.yml          # the stack: all non-secret config, caps, tuning
 ├── .env.example                # every variable, with a "tiny host" override set
 ├── extensions/                 # vendored static-keys tenant extension (MIT)
-├── adapters/deepinfra-rerank/  # Cohere /rerank -> DeepInfra translation (stdlib)
 ├── scripts/
 │   ├── smoke-test.sh|ps1       # verification, both platforms
 │   ├── mint-keys.sh|ps1        # generate the bearer keys/secrets
