@@ -97,7 +97,9 @@ x-hindsight-env: &hindsight-env
   HINDSIGHT_API_RERANKER_COHERE_BASE_URL: https://aigateway.newtecons.vn/v1/rerank
   HINDSIGHT_API_RERANKER_COHERE_API_KEY: ${HINDSIGHT_LITELLM_KEY:?HINDSIGHT_LITELLM_KEY is required}
   HINDSIGHT_API_RERANKER_COHERE_MODEL: ${RERANKER_MODEL:-deepinfra/Qwen/Qwen3-Reranker-0.6B}
-  HINDSIGHT_API_RERANKER_COHERE_TIMEOUT: "40"
+  HINDSIGHT_API_RERANKER_COHERE_MAX_CONCURRENT: "10"
+  HINDSIGHT_API_RECALL_MAX_CANDIDATES_PER_SOURCE: "120"
+  HINDSIGHT_API_RERANKER_COHERE_TIMEOUT: "60"
 
   # ── Decision model: Jev 1.14 ON (System One via OpenRouter) ─────────────
   # Split by capability, not by taste:
