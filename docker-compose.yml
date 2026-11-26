@@ -179,16 +179,32 @@ x-hindsight-env: &hindsight-env
   # are still indexed with the english config upstream (see docs/decisions.md).
   HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE: simple
   HINDSIGHT_API_OPERATION_RETENTION_DAYS: "${OPERATION_RETENTION_DAYS:-30}"
-  # ── Knowledge banks (1.3.0): off, deliberately ───────────────────────────
-  # 1.3.0 turns knowledge banks on by default. They are a document-RAG feature
-  # (own embedded document store, own reranker, its own ingest workers) that this
-  # deployment does not serve: the bank here is a memory bank, and RAG documents
-  # live in Open WebUI. The slim image also ships no local embedder, and the KB
-  # default embedder is the local EmbeddingGemma 2 — an upload would fail rather
-  # than degrade. Pinned off so an upgrade does not silently change the surface;
-  # to enable, set this true and give the KB a remote embedder
-  # (HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER=openai + _BASE_URL/_MODEL/_API_KEY).
-  HINDSIGHT_API_ENABLE_KB: "false"
+  # ── Knowledge banks (1.3.0): ON, text only ───────────────────────────────
+  # A knowledge bank is a document store next to the memory bank: upload files,
+  # search them, and link them to a memory bank so reflect can cite them.
+  #
+  # The embedder is `text`: knowledge banks reuse the memory embeddings setup
+  # (Qwen3-Embedding-0.6B on DeepInfra, 1024-dim) instead of the upstream default
+  # `local` (EmbeddingGemma 2), which needs torch and is not in the slim image.
+  # Consequence: text and documents (PDF/DOCX/XLSX via markitdown) are indexed;
+  # image, audio and video are refused up front rather than failing mid-ingest.
+  # Their local conversion also needs ffmpeg/PyAV, which this image does not ship.
+  HINDSIGHT_API_ENABLE_KB: "true"
+  HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER: text
+  HINDSIGHT_API_KB_DISABLED_MEDIA_TYPES: image,audio,video
+  # Same reranker as recall, through LiteLLM. Without these two lines the KB
+  # still searches (vector + keyword, RRF) but skips reranking entirely.
+  HINDSIGHT_API_KB_RERANKER_URL: https://aigateway.newtecons.vn/v1/rerank
+  HINDSIGHT_API_KB_RERANKER_MODEL: ${RERANKER_MODEL:-deepinfra/Qwen/Qwen3-Reranker-0.6B}
+  HINDSIGHT_API_KB_RERANKER_API_KEY: ${HINDSIGHT_LITELLM_KEY:?HINDSIGHT_LITELLM_KEY is required}
+  # PDF ingest also stores a rendered image per page; the reranker would send that
+  # image to DeepInfra, whose /rerank accepts strings only (HTTP 422, search then
+  # returns 503 "knowledge reranker unavailable"). Keep images out of the rerank.
+  HINDSIGHT_API_KB_RERANKER_IMAGES: "false"
+  # Ingest memory ceiling per worker, and the file cap. 128 MB is the upstream
+  # default; a 500 MB spreadsheet or a 2 000-page PDF is where it stops.
+  HINDSIGHT_API_KB_INGEST_MEMORY_BUDGET_MB: "${KB_INGEST_MEMORY_BUDGET_MB:-128}"
+  HINDSIGHT_API_KB_MAX_FILE_MB: "${KB_MAX_FILE_MB:-100}"
   HINDSIGHT_API_METRICS_BACKLOG_ENABLED: "true"
 
   # ── Webhooks ────────────────────────────────────────────────────────────

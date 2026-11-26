@@ -14,8 +14,8 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 - Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, **through LiteLLM** (`/v1/rerank`)
 - Decision model (Jev 1.14, via OpenRouter): **on by default** — it does the jobs
   only a decision model can; ranking stays on the reranker (§5)
-- Knowledge banks (new in 1.3.0): **off on purpose** — this is a memory bank; the
-  slim image ships no local KB embedder (see `docs/release-1.3.0.md` §2)
+- Knowledge banks (new in 1.3.0): **on, text and documents only** — the KB reuses
+  the memory embeddings; image/audio/video are refused (see `docs/release-1.3.0.md` §2)
 - **No GPU, no local model, no build step.**
 
 ---

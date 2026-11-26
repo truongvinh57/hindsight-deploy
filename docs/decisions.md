@@ -479,20 +479,31 @@ prune/dedup ever matter more than junk separation and read-path independence —
 and then it is one env var, plus deleting the adapter service and its
 `HINDSIGHT_API_RERANKER_*` block so nothing sits unused.
 
-## 14. Upgrade to 1.3.0: knowledge banks stay off
+## 14. Upgrade to 1.3.0: knowledge banks on, text only
 
 1.3.0 ships knowledge banks on by default (`DEFAULT_ENABLE_KB = True`): a document
-store with its own embedder, its own reranker and its own ingest workers. This
-stack is a memory service — the company's documents are indexed in Open WebUI —
-so the feature would be a second, unused document store. It is also unusable as
-shipped on the `slim` image: the KB default embedder is the local
-`google/embeddinggemma-2`, and the image carries no `torch`/`sentence-transformers`,
-so an upload would fail outright rather than degrade.
+store with its own embedder, reranker and ingest workers. It was first pinned off
+— this stack is a memory service and the company's documents are indexed in
+Open WebUI — then enabled on request with the minimum that works on the `slim`
+image, which carries no `torch` and therefore cannot run the upstream default
+embedder (local EmbeddingGemma 2):
 
-Pinned `HINDSIGHT_API_ENABLE_KB: "false"`, documented in `.env.example` with the
-two changes needed to turn it on (flag plus a remote embedder). Everything else
-in 1.3.0 applies as-is: no environment variable was renamed or removed
-(543 → 603 names, all additions), the tenant extension API is byte-identical, and
-the System One call path (`<base_url>/v1/systemone`) and the recency weight
-(`alpha = 0.2`) are unchanged, so the RRF + Qwen3 rerank tuning of section 10–13
-keeps its meaning. Evidence and rollback: `docs/release-1.3.0.md`.
+- `HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER=text` reuses the memory embeddings
+  (Qwen3-Embedding-0.6B on DeepInfra, 1024-dim), so text and documents ingest
+  with no new provider and no new credential.
+- `HINDSIGHT_API_KB_DISABLED_MEDIA_TYPES=image,audio,video`: the text embedder
+  has no use for them and their conversion needs ffmpeg/PyAV, absent from this
+  image. They are refused with 415 instead of failing mid-ingest.
+- The KB reranker points at the same LiteLLM `/v1/rerank` as recall, with
+  `HINDSIGHT_API_KB_RERANKER_IMAGES=false`. That last flag is not cosmetic: a PDF
+  stores a rendered image per page, the reranker sent it to DeepInfra, whose
+  `/rerank` accepts strings only, and every search returned 503
+  "knowledge reranker unavailable" (HTTP 422 upstream). With images excluded the
+  rerank runs in 0.4–1.0 s and search totals 0.8–1.6 s.
+
+Everything else in 1.3.0 applies as-is: no environment variable was renamed or
+removed (543 → 603 names, all additions), the tenant extension API is
+byte-identical, and the System One call path (`<base_url>/v1/systemone`) and the
+recency weight (`alpha = 0.2`) are unchanged, so the RRF + Qwen3 rerank tuning of
+sections 10–13 keeps its meaning. Evidence and rollback:
+`docs/release-1.3.0.md`.

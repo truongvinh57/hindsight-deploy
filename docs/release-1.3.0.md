@@ -30,18 +30,22 @@ Sửa lỗi đáng kể với đúng workload này (đọc từ changelog rồi 
 - `#6825` migration giữ `search_path` cho schema extension — liên quan trực tiếp các schema `user_*`.
 - `#6812` mental model giữ structured output khi một lượt refresh lỗi.
 
-## 2. Quyết định: knowledge banks tắt có chủ đích
+## 2. Knowledge banks: bật, chỉ văn bản
 
-`HINDSIGHT_API_ENABLE_KB: "false"` trong `docker-compose.yml`.
+Ban đầu đặt `HINDSIGHT_API_ENABLE_KB: "false"` (kho này là kho bộ nhớ). Sau đó bật theo yêu cầu, với
+cấu hình tối thiểu chạy được trên image `slim`:
 
-Lý do:
+| Biến | Giá trị | Vì sao |
+|---|---|---|
+| `HINDSIGHT_API_ENABLE_KB` | `true` | mở endpoint `/v1/default/knowledge-banks` và tab trên control-plane |
+| `HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER` | `text` | dùng lại embedder của bộ nhớ (Qwen3-Embedding-0.6B trên DeepInfra, 1024 chiều). Mặc định upstream là `local` (EmbeddingGemma 2) cần `torch`, image `slim` không có |
+| `HINDSIGHT_API_KB_DISABLED_MEDIA_TYPES` | `image,audio,video` | embedder chỉ nhận văn bản; ảnh/audio/video bị từ chối ngay (HTTP 415) thay vì lỗi giữa lúc ingest |
+| `HINDSIGHT_API_KB_RERANKER_URL` / `_MODEL` / `_API_KEY` | LiteLLM `/v1/rerank`, Qwen3-Reranker | dùng chung reranker với recall; không đặt thì KB vẫn tìm được nhưng bỏ qua rerank |
+| `HINDSIGHT_API_KB_RERANKER_IMAGES` | `false` | **bắt buộc**: PDF sinh thêm một ảnh mỗi trang, reranker gửi ảnh đó cho DeepInfra và bị 422 (`Input should be a valid string`), search trả 503. Tắt ảnh thì chỉ văn bản vào rerank |
+| `HINDSIGHT_API_KB_MAX_FILE_MB` | `100` | hạ từ 500 để một tệp lớn không ăn hết 1 GB của api |
 
-1. Đây là kho **bộ nhớ**, không phải kho tài liệu. Tài liệu RAG của công ty nằm ở Open WebUI; bật thêm một kho tài liệu thứ hai là nhân đôi chỗ lưu và chỗ cấu hình.
-2. Image `slim` không kèm embedder cục bộ (không `torch`, không `sentence-transformers`), trong khi embedder mặc định của knowledge bank là `google/embeddinggemma-2` chạy local (~1,5 GB). Bật cờ mà không đổi embedder thì mọi lần tải tệp lên sẽ **lỗi**, không phải suy giảm.
-3. Bật mặc định sẽ đổi bề mặt dịch vụ (endpoint mới, worker ingest mới, tab mới trên control-plane) mà không ai yêu cầu. Tắt và ghi lại ở đây minh bạch hơn là để mặc định tự đổi.
-
-Muốn bật: đặt `true` và trỏ knowledge bank sang embedder từ xa
-(`HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER=openai` + `_BASE_URL`/`_MODEL`/`_API_KEY`).
+Định dạng đọc được: văn bản/markdown, PDF, Office (docx/pptx/xlsx/xls) — chuyển bằng `markitdown` có
+sẵn trong image. Ảnh, audio, video: không.
 
 ## 3. Quy trình đã chạy
 
@@ -66,6 +70,17 @@ Muốn bật: đặt `true` và trỏ knowledge bank sang embedder từ xa
 | Lỗi LLM sau nâng cấp | **0** (53 lỗi trong 24 h đều thuộc 25/11 07:29–09:44 UTC, trước khi nâng) | `llm_requests where status='error'` |
 | Control-plane | `/` trả 307 → `/login` 200 | `curl` |
 
+Kiểm chứng knowledge banks (bank thử `kb-kiem-thu`, đã xoá sau khi đo):
+
+| Hạng mục | Số đo | Cách đo |
+|---|---|---|
+| Tạo bank | 0,17 s, HTTP 200 | `POST /v1/default/knowledge-banks` |
+| Ingest văn bản | 0,86 s, 1 passage, `status=ready` | `POST /{bank}/ingest` |
+| Ingest PDF (11 trang) | 202 → operation `knowledge_ingest` completed, `status=ready`, 5 passage | `POST /{bank}/files/ingest`, đọc `/{bank}/operations` |
+| Search | 0,76–1,56 s, 3 hit; `rerank` 418–1 046 ms, `embed` 314–766 ms, `store.search` 5–6 ms | `POST /{bank}/search` với `trace: true` |
+| Ảnh bị từ chối | HTTP 415 `"'x.png' is image, which this server does not ingest"` | `POST /{bank}/files/ingest` |
+| Dọn dẹp | `DELETE /{bank}` → 200, danh sách bank rỗng | `GET /v1/default/knowledge-banks` |
+
 ## 5. Rollback
 
 Ảnh `1.2.0-slim` và CP `1.2.0` vẫn còn trên máy, nhưng **chỉ đổi tag là không đủ**: schema đã ở revision `kbtok1a2b3c4`, bản 1.2.0 không có revision đó nên Alembic sẽ dừng ở bước đọc lịch sử.
@@ -84,4 +99,8 @@ Khôi phục dump sẽ **mất mọi ký ức ghi sau 13:07 ngày 26/11**.
 
 - [ ] Đưa `preimage/` vào lịch backup (dump 355 MB đang chỉ nằm trên PC).
 - [ ] Theo dõi 24 h: `async_operations` lỗi, độ trễ recall, RSS của api/worker.
-- [ ] Nếu muốn dùng knowledge banks: chọn embedder từ xa trước khi bật cờ.
+- [ ] Knowledge banks mới chỉ nhận văn bản/tài liệu. Muốn ảnh, audio, video: dựng image có `local-ml`
+      (torch + PyAV) hoặc trỏ `HINDSIGHT_API_KB_EMBEDDINGS_PROVIDER=openai` vào một embedder đa phương
+      thức từ xa, rồi bỏ các mục tương ứng khỏi `HINDSIGHT_API_KB_DISABLED_MEDIA_TYPES`.
+- [ ] Muốn `reflect` trích dẫn tài liệu: liên kết knowledge bank với bank bộ nhớ (linked knowledge
+      banks) — chưa cấu hình, chưa kiểm chứng.
