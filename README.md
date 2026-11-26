@@ -4,7 +4,7 @@ Self-hosted **Hindsight** (agent memory) on Docker: full feature set, several
 isolated users, every model remote. Clone it on any machine with Docker, fill in
 `.env`, run one smoke test.
 
-- Hindsight **1.2.0**, upstream images, **nothing is built here**
+- Hindsight **1.3.0**, upstream images, **nothing is built here**
 - Users: **hermes-agent** (primary, and the control-plane's data-plane key) and
   **cherry-studio** (MCP), one bearer key and one PostgreSQL schema each
   (`user_hermes_agent`, `user_cherry_studio`)
@@ -14,6 +14,8 @@ isolated users, every model remote. Clone it on any machine with Docker, fill in
 - Reranker: `Qwen/Qwen3-Reranker-0.6B` on DeepInfra, **through LiteLLM** (`/v1/rerank`)
 - Decision model (Jev 1.14, via OpenRouter): **on by default** — it does the jobs
   only a decision model can; ranking stays on the reranker (§5)
+- Knowledge banks (new in 1.3.0): **off on purpose** — this is a memory bank; the
+  slim image ships no local KB embedder (see `docs/release-1.3.0.md` §2)
 - **No GPU, no local model, no build step.**
 
 ---

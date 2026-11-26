@@ -15,3 +15,9 @@ webhook-sink.log
 Thumbs.db
 .idea/
 .vscode/
+
+# Pre-upgrade DB dumps and local backup copies: large, and may hold real memory
+preimage/
+*.dump
+*.sql.gz
+*.bak-*
